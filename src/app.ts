@@ -165,104 +165,162 @@ async function analyzeColumns(
 
         const fileStream = fs.createReadStream(filePath);
         let buffer = '';
+        let inQuotes = false;
+        let currentField = '';
+        let currentRow: string[] = [];
 
-        // Update progress bar with initial status
         progressBar?.update(30, { stage: 'Analyzing columns (0%)' });
 
         fileStream
             .on('data', (chunk) => {
-                buffer += chunk.toString();
-                const lines = buffer.split('\n');
-                buffer = lines.pop() || '';
+                const data = chunk.toString();
+                
+                for (let i = 0; i < data.length; i++) {
+                    const char = data[i];
 
-                for (const line of lines) {
-                    if (!headerProcessed) {
-                        // Initialize column metadata, now with system header filtering
-                        const headers = line.split(',').map(h => h.trim());
-                        headers.forEach(header => {
-                            // Skip system headers if excludeSystemHeaders is true
-                            if (excludeSystemHeaders && SYSTEM_HEADERS.includes(header.toLowerCase())) {
-                                return;
-                            }
-
-                            columns.set(header, {
-                                name: header,
-                                dataType: 'Unknown',
-                                totalCount: 0,
-                                nonNullCount: 0,
-                                uniqueCount: 0,
-                                maxLength: 0,
-                                minLength: undefined,
-                                topValues: []
-                            });
-                            valueMap.set(header, new Set());
-                            valueCount.set(header, new Map());
-                        });
-                        progressBar?.update(35, { stage: 'Headers processed' });
-                        headerProcessed = true;
-                        continue;
-                    }
-
-                    // Process column values
-                    const values = line.split(',');
-                    values.forEach((value, index) => {
-                        const header = Array.from(columns.keys())[index];
-                        if (!header) return;
-
-                        const metadata = columns.get(header)!;
-                        metadata.totalCount++;
-
-                        value = value.trim().replace(/"/g, '');
-                        if (value) {
-                            metadata.nonNullCount++;
-                            valueMap.get(header)?.add(value);
-
-                            // Update value frequency
-                            const frequencyMap = valueCount.get(header)!;
-                            frequencyMap.set(value, (frequencyMap.get(value) || 0) + 1);
-
-                            // Update string metrics
-                            metadata.maxLength = Math.max(metadata.maxLength!, value.length);
-                            metadata.minLength = metadata.minLength === undefined ? 
-                                value.length : Math.min(metadata.minLength, value.length);
-
-                            // Detect data type
-                            if (metadata.dataType === 'Unknown') {
-                                if (/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(value)) {
-                                    metadata.dataType = 'GUID';
-                                } else if (!isNaN(Number(value))) {
-                                    metadata.dataType = 'Number';
-                                } else if (!isNaN(Date.parse(value))) {
-                                    metadata.dataType = 'Date';
-                                } else if (value.toLowerCase() === 'true' || value.toLowerCase() === 'false') {
-                                    metadata.dataType = 'Boolean';
-                                } else {
-                                    metadata.dataType = 'String';
-                                }
-                            }
-
-                            // Additional insights
-                            metadata.isAllUpperCase = value === value.toUpperCase();
-                            metadata.containsMultipleLines = value.includes('\n') || value.includes('\r');
-                            metadata.hasSpecialCharacters = /[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>/?]+/.test(value);
+                    if (char === '"') {
+                        inQuotes = !inQuotes;
+                    } else if (char === ',' && !inQuotes) {
+                        currentRow.push(currentField);
+                        currentField = '';
+                    } else if ((char === '\n' || char === '\r') && !inQuotes) {
+                        if (char === '\r' && data[i + 1] === '\n') {
+                            i++; // Skip the \n in \r\n
                         }
-                    });
+                        
+                        currentRow.push(currentField);
+                        
+                        if (!headerProcessed) {
+                            // Process headers
+                            currentRow.forEach(header => {
+                                const cleanHeader = header.trim();
+                                if (!excludeSystemHeaders || !SYSTEM_HEADERS.includes(cleanHeader.toLowerCase())) {
+                                    columns.set(cleanHeader, {
+                                        name: cleanHeader,
+                                        dataType: 'Unknown',
+                                        totalCount: 0,
+                                        nonNullCount: 0,
+                                        uniqueCount: 0,
+                                        maxLength: 0,
+                                        minLength: undefined,
+                                        topValues: []
+                                    });
+                                    valueMap.set(cleanHeader, new Set());
+                                    valueCount.set(cleanHeader, new Map());
+                                }
+                            });
+                            headerProcessed = true;
+                        } else {
+                            // Process row data
+                            Array.from(columns.keys()).forEach((header, index) => {
+                                const value = (currentRow[index] || '').trim().replace(/^"|"$/g, '');
+                                const metadata = columns.get(header)!;
+                                
+                                metadata.totalCount++;
 
-                    // Update progress every 1000 rows
-                    processedRows++;
-                    if (processedRows % 1000 === 0) {
-                        const progress = 35 + ((processedRows / totalRows) * 45);
-                        const percentage = Math.round((processedRows / totalRows) * 100);
-                        progressBar?.update(progress, { 
-                            stage: `Analyzing columns (${percentage}%) [${processedRows}/${totalRows}]` 
+                                if (value) {
+                                    metadata.nonNullCount++;
+                                    valueMap.get(header)?.add(value);
+
+                                    // Update value frequency
+                                    const frequencyMap = valueCount.get(header)!;
+                                    frequencyMap.set(value, (frequencyMap.get(value) || 0) + 1);
+
+                                    // Update string metrics
+                                    metadata.maxLength = Math.max(metadata.maxLength!, value.length);
+                                    metadata.minLength = metadata.minLength === undefined ? 
+                                        value.length : Math.min(metadata.minLength, value.length);
+
+                                    // Detect data type
+                                    if (metadata.dataType === 'Unknown') {
+                                        if (/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(value)) {
+                                            metadata.dataType = 'GUID';
+                                        } else if (!isNaN(Number(value))) {
+                                            metadata.dataType = 'Number';
+                                        } else if (!isNaN(Date.parse(value))) {
+                                            metadata.dataType = 'Date';
+                                        } else if (value.toLowerCase() === 'true' || value.toLowerCase() === 'false') {
+                                            metadata.dataType = 'Boolean';
+                                        } else {
+                                            metadata.dataType = 'String';
+                                        }
+                                    }
+
+                                    // Additional insights
+                                    metadata.isAllUpperCase = value === value.toUpperCase();
+                                    metadata.containsMultipleLines = value.includes('\n') || value.includes('\r');
+                                    metadata.hasSpecialCharacters = /[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>/?]+/.test(value);
+                                }
+                            });
+
+                            processedRows++;
+                            if (processedRows % 1000 === 0) {
+                                const progress = 35 + ((processedRows / totalRows) * 45);
+                                const percentage = Math.round((processedRows / totalRows) * 100);
+                                progressBar?.update(progress, { 
+                                    stage: `Analyzing columns (${percentage}%) [${processedRows}/${totalRows}]` 
+                                });
+                            }
+                        }
+                        
+                        currentRow = [];
+                        currentField = '';
+                    } else {
+                        currentField += char;
+                    }
+                }
+                buffer = currentField;
+            })
+            .on('end', () => {
+                // Process any remaining data
+                if (buffer.trim()) {
+                    currentRow.push(buffer);
+                    // Process final row if not empty
+                    if (currentRow.length > 0) {
+                        Array.from(columns.keys()).forEach((header, index) => {
+                            const value = (currentRow[index] || '').trim().replace(/^"|"$/g, '');
+                            const metadata = columns.get(header)!;
+                            
+                            metadata.totalCount++;
+
+                            if (value) {
+                                metadata.nonNullCount++;
+                                valueMap.get(header)?.add(value);
+
+                                // Update value frequency
+                                const frequencyMap = valueCount.get(header)!;
+                                frequencyMap.set(value, (frequencyMap.get(value) || 0) + 1);
+
+                                // Update string metrics
+                                metadata.maxLength = Math.max(metadata.maxLength!, value.length);
+                                metadata.minLength = metadata.minLength === undefined ? 
+                                    value.length : Math.min(metadata.minLength, value.length);
+
+                                // Detect data type
+                                if (metadata.dataType === 'Unknown') {
+                                    if (/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(value)) {
+                                        metadata.dataType = 'GUID';
+                                    } else if (!isNaN(Number(value))) {
+                                        metadata.dataType = 'Number';
+                                    } else if (!isNaN(Date.parse(value))) {
+                                        metadata.dataType = 'Date';
+                                    } else if (value.toLowerCase() === 'true' || value.toLowerCase() === 'false') {
+                                        metadata.dataType = 'Boolean';
+                                    } else {
+                                        metadata.dataType = 'String';
+                                    }
+                                }
+
+                                // Additional insights
+                                metadata.isAllUpperCase = value === value.toUpperCase();
+                                metadata.containsMultipleLines = value.includes('\n') || value.includes('\r');
+                                metadata.hasSpecialCharacters = /[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>/?]+/.test(value);
+                            }
                         });
                     }
                 }
-            })
-            .on('end', () => {
-                progressBar?.update(80, { stage: 'Finalizing column analysis' });
-                
-                // Finalize metadata
+
+                // Finalize metadata processing
                 for (const [header, metadata] of columns) {
                     const uniqueValues = valueMap.get(header)!;
                     metadata.uniqueCount = uniqueValues.size;
