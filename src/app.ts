@@ -99,8 +99,9 @@ async function downloadCSV(fileName: string) {
             fs.mkdirSync(downloadPath, { recursive: true });
         }
 
+        const destinationPath = path.join(downloadPath, baseFileName);
         const options = {
-            destination: path.join(downloadPath, baseFileName),
+            destination: destinationPath,
         };
 
         // Check if file exists first
@@ -111,7 +112,7 @@ async function downloadCSV(fileName: string) {
         }
 
         await storage.bucket(bucketName).file(fileName).download(options);
-        console.log(`Downloaded ${fileName} to ${options.destination} (${analysis.rowCount} rows, ${analysis.columnCount} columns)`);
+        console.log(`Downloaded ${fileName} to ${destinationPath} (${analysis.rowCount} rows, ${analysis.columnCount} columns)`);
     } catch (error) {
         console.error(`Failed to process ${fileName}:`, error);
     }
