@@ -23,7 +23,6 @@ const SYSTEM_HEADERS = [
     'createdby',
     'createdbyname',
     'createdbyyominame',
-    'createdon',
     'createdonbehalfby',
     'createdonbehalfbyname',
     'createdonbehalfbyyominame',
@@ -407,56 +406,127 @@ async function findLatestCreationDate(filePath: string): Promise<string> {
 
 class CSVTransform extends Transform {
     private partialChunk: string = '';
+    private isFirstChunk: boolean = true;
+    private headers: string[] = [];
+    private headerIndices: number[] = [];
 
     _transform(chunk: Buffer, encoding: BufferEncoding, callback: (error?: Error | null, data?: any) => void) {
         let data = this.partialChunk + chunk.toString();
         let inQuotes = false;
         let result = '';
         
-        // Process the data character by character
+        // Handle headers in the first chunk
+        if (this.isFirstChunk) {
+            const newlineIndex = data.indexOf('\n');
+            if (newlineIndex === -1) {
+                // If we don't have a complete header row, store it and wait for more data
+                this.partialChunk = data;
+                callback();
+                return;
+            }
+
+            // Extract and process headers
+            const headerRow = data.substring(0, newlineIndex);
+            this.headers = this.parseCSVLine(headerRow);
+            
+            // Determine which columns to keep (non-system headers)
+            this.headerIndices = this.headers
+                .map((header, index) => !SYSTEM_HEADERS.includes(header.toLowerCase()) ? index : -1)
+                .filter(index => index !== -1);
+
+            // Output filtered header row
+            const filteredHeaders = this.headerIndices.map(i => this.headers[i]);
+            result = filteredHeaders.join(',') + '\n';
+            
+            // Remove the header row from data
+            data = data.substring(newlineIndex + 1);
+            this.isFirstChunk = false;
+        }
+
+        // Process the remaining data
+        let currentField = '';
+        let currentLine: string[] = [];
+        
         for (let i = 0; i < data.length; i++) {
             const char = data[i];
-            const nextChar = data[i + 1];
             
-            // Toggle quote state
             if (char === '"') {
                 inQuotes = !inQuotes;
-            }
-            
-            // Handle different line break scenarios
-            if (inQuotes) {
-                if (char === '\r' && nextChar === '\n') {
-                    // Windows-style line break (\r\n)
-                    result += ' ';
-                    i++; // Skip the next \n
-                } else if (char === '\n' || char === '\r') {
-                    // Unix (\n) or old Mac (\r) line breaks
-                    result += ' ';
-                } else {
-                    result += char;
+                currentField += char;
+            } else if (char === ',' && !inQuotes) {
+                // End of field
+                currentLine.push(currentField);
+                currentField = '';
+            } else if ((char === '\n' || char === '\r') && !inQuotes) {
+                // End of line
+                if (char === '\r' && data[i + 1] === '\n') {
+                    i++; // Skip the \n in \r\n
+                }
+                
+                currentLine.push(currentField);
+                // Filter the line based on headerIndices
+                const filteredLine = this.headerIndices.map(index => currentLine[index] || '');
+                result += filteredLine.join(',') + '\n';
+                
+                // Reset for next line
+                currentLine = [];
+                currentField = '';
+            } else if (inQuotes && (char === '\n' || char === '\r')) {
+                // Replace line breaks within quoted fields with space
+                currentField += ' ';
+                if (char === '\r' && data[i + 1] === '\n') {
+                    i++; // Skip the \n in \r\n
                 }
             } else {
-                result += char;
+                currentField += char;
             }
         }
-        
-        // Store the last part of the chunk if we're in quotes
-        if (inQuotes) {
-            this.partialChunk = result;
-            result = '';
+
+        // Store any incomplete data
+        if (inQuotes || currentField || currentLine.length > 0) {
+            this.partialChunk = currentField;
+            if (currentLine.length > 0) {
+                this.partialChunk = currentLine.join(',') + ',' + this.partialChunk;
+            }
         } else {
             this.partialChunk = '';
         }
-        
+
         callback(null, result);
     }
 
     _flush(callback: (error?: Error | null, data?: any) => void) {
         if (this.partialChunk) {
-            callback(null, this.partialChunk);
+            const currentLine = this.parseCSVLine(this.partialChunk);
+            const filteredLine = this.headerIndices.map(index => currentLine[index] || '');
+            callback(null, filteredLine.join(','));
         } else {
             callback();
         }
+    }
+
+    private parseCSVLine(line: string): string[] {
+        const fields: string[] = [];
+        let currentField = '';
+        let inQuotes = false;
+
+        for (let i = 0; i < line.length; i++) {
+            const char = line[i];
+            if (char === '"') {
+                inQuotes = !inQuotes;
+                currentField += char;
+            } else if (char === ',' && !inQuotes) {
+                fields.push(currentField);
+                currentField = '';
+            } else {
+                currentField += char;
+            }
+        }
+        
+        // Make sure to trim the last field to handle any trailing whitespace
+        fields.push(currentField.trim());
+        
+        return fields;
     }
 }
 
