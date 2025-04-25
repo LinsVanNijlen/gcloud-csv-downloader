@@ -18,6 +18,48 @@ function getRequiredEnvVar(name: string): string {
 const bucketName = getRequiredEnvVar('BUCKET_NAME');
 const storage = new Storage({});
 
+const SYSTEM_HEADERS = [
+    // Creation related
+    'createdby',
+    'createdbyname',
+    'createdbyyominame',
+    'createdon',
+    'createdonbehalfby',
+    'createdonbehalfbyname',
+    'createdonbehalfbyyominame',
+
+    // Modification related
+    'modifiedby',
+    'modifiedbyname',
+    'modifiedbyyominame',
+    'modifiedon',
+    'modifiedonbehalfby',
+    'modifiedonbehalfbyname',
+    'modifiedonbehalfbyyominame',
+
+    // Owner related
+    'ownerid',
+    'owneridname',
+    'owneridtype',
+    'owneridyominame',
+    'owningbusinessunit',
+    'owningbusinessunitname',
+    'owningteam',
+    'owninguser',
+
+    // Status related
+    'statecode',
+    'statuscode',
+
+    // System fields
+    'importsequencenumber',
+    'overriddencreatedon',
+    'timezoneruleversionnumber',
+    'utcconversiontimezonecode',
+    'versionnumber',
+    'export_date'
+];
+
 async function listFiles() {
     try {
         const [files] = await storage.bucket(bucketName).getFiles();
@@ -112,7 +154,8 @@ async function analyzeCSV(fileName: string): Promise<CSVAnalysis> {
 async function analyzeColumns(
     filePath: string, 
     totalRows: number,
-    progressBar?: cliProgress.SingleBar
+    progressBar?: cliProgress.SingleBar,
+    excludeSystemHeaders: boolean = true // New parameter
 ): Promise<ColumnMetadata[]> {
     return new Promise((resolve, reject) => {
         const columns: Map<string, ColumnMetadata> = new Map();
@@ -135,9 +178,14 @@ async function analyzeColumns(
 
                 for (const line of lines) {
                     if (!headerProcessed) {
-                        // Initialize column metadata
+                        // Initialize column metadata, now with system header filtering
                         const headers = line.split(',').map(h => h.trim());
                         headers.forEach(header => {
+                            // Skip system headers if excludeSystemHeaders is true
+                            if (excludeSystemHeaders && SYSTEM_HEADERS.includes(header.toLowerCase())) {
+                                return;
+                            }
+
                             columns.set(header, {
                                 name: header,
                                 dataType: 'Unknown',
@@ -268,20 +316,21 @@ async function generateMetadata(
     fileName: string, 
     analysis: CSVAnalysis, 
     filePath: string, 
-    progressBar?: cliProgress.SingleBar
+    progressBar?: cliProgress.SingleBar,
+    excludeSystemHeaders: boolean = true // New parameter
 ): Promise<CSVMetadata> {
     const stats = await fs.promises.stat(filePath);
     progressBar?.update(30, { stage: 'Reading creation dates' });
     
     const latestCreation = await findLatestCreationDate(filePath);
-    const columns = await analyzeColumns(filePath, analysis.rowCount, progressBar);
+    const columns = await analyzeColumns(filePath, analysis.rowCount, progressBar, excludeSystemHeaders);
     
     progressBar?.update(90, { stage: 'Preparing final metadata' });
     
     return {
         fileName: fileName,
         rowCount: analysis.rowCount,
-        columnCount: analysis.columnCount,
+        columnCount: columns.length, // Update to use actual analyzed columns length
         sizeInBytes: stats.size,
         latestCreation: latestCreation,
         columns: columns
@@ -411,7 +460,7 @@ class CSVTransform extends Transform {
     }
 }
 
-async function downloadCSV(fileName: string) {
+async function downloadCSV(fileName: string, excludeSystemHeaders: boolean = true) {
     try {
         console.log(`\nProcessing ${fileName}...`);
         
@@ -477,7 +526,13 @@ async function downloadCSV(fileName: string) {
 
         // Generate metadata with progress updates
         metadataBar.update(30);
-        const metadata = await generateMetadata(fileName, analysis, destinationPath, metadataBar);
+        const metadata = await generateMetadata(
+            fileName, 
+            analysis, 
+            destinationPath, 
+            metadataBar,
+            excludeSystemHeaders
+        );
         metadataBar.update(60);
         
         // Save metadata
