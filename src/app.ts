@@ -3,6 +3,7 @@ import * as dotenv from 'dotenv';
 import * as fs from 'fs';
 import * as path from 'path';
 import { Transform } from 'stream';
+import * as cliProgress from 'cli-progress';
 
 dotenv.config();
 
@@ -107,15 +108,24 @@ async function analyzeCSV(fileName: string): Promise<CSVAnalysis> {
     });
 }
 
-async function analyzeColumns(filePath: string): Promise<ColumnMetadata[]> {
+// First modify the function signature to accept the progress bar
+async function analyzeColumns(
+    filePath: string, 
+    totalRows: number,
+    progressBar?: cliProgress.SingleBar
+): Promise<ColumnMetadata[]> {
     return new Promise((resolve, reject) => {
         const columns: Map<string, ColumnMetadata> = new Map();
         let headerProcessed = false;
         let valueMap: Map<string, Set<string>> = new Map();
         let valueCount: Map<string, Map<string, number>> = new Map();
+        let processedRows = 0;
 
         const fileStream = fs.createReadStream(filePath);
         let buffer = '';
+
+        // Update progress bar with initial status
+        progressBar?.update(30, { stage: 'Analyzing columns (0%)' });
 
         fileStream
             .on('data', (chunk) => {
@@ -141,6 +151,7 @@ async function analyzeColumns(filePath: string): Promise<ColumnMetadata[]> {
                             valueMap.set(header, new Set());
                             valueCount.set(header, new Map());
                         });
+                        progressBar?.update(35, { stage: 'Headers processed' });
                         headerProcessed = true;
                         continue;
                     }
@@ -189,9 +200,21 @@ async function analyzeColumns(filePath: string): Promise<ColumnMetadata[]> {
                             metadata.hasSpecialCharacters = /[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>/?]+/.test(value);
                         }
                     });
+
+                    // Update progress every 1000 rows
+                    processedRows++;
+                    if (processedRows % 1000 === 0) {
+                        const progress = 35 + ((processedRows / totalRows) * 45);
+                        const percentage = Math.round((processedRows / totalRows) * 100);
+                        progressBar?.update(progress, { 
+                            stage: `Analyzing columns (${percentage}%) [${processedRows}/${totalRows}]` 
+                        });
+                    }
                 }
             })
             .on('end', () => {
+                progressBar?.update(80, { stage: 'Finalizing column analysis' });
+                
                 // Finalize metadata
                 for (const [header, metadata] of columns) {
                     const uniqueValues = valueMap.get(header)!;
@@ -207,25 +230,62 @@ async function analyzeColumns(filePath: string): Promise<ColumnMetadata[]> {
                     if (metadata.dataType === 'Number') {
                         const numbers = Array.from(uniqueValues).map(Number).filter(n => !isNaN(n));
                         if (numbers.length > 0) {
-                            metadata.min = Math.min(...numbers);
-                            metadata.max = Math.max(...numbers);
-                            metadata.average = numbers.reduce((a, b) => a + b) / numbers.length;
+                            const { min, max, sum } = numbers.reduce((acc, num) => ({
+                                min: Math.min(acc.min, num),
+                                max: Math.max(acc.max, num),
+                                sum: acc.sum + num
+                            }), { min: Infinity, max: -Infinity, sum: 0 });
+
+                            metadata.min = min;
+                            metadata.max = max;
+                            metadata.average = sum / numbers.length;
                         }
                     } else if (metadata.dataType === 'Date') {
                         const dates = Array.from(uniqueValues)
                             .map(d => new Date(d))
                             .filter(d => !isNaN(d.getTime()));
                         if (dates.length > 0) {
-                            metadata.earliestDate = new Date(Math.min(...dates.map(d => d.getTime()))).toISOString();
-                            metadata.latestDate = new Date(Math.max(...dates.map(d => d.getTime()))).toISOString();
+                            const { earliest, latest } = dates.reduce((acc, date) => ({
+                                earliest: date < acc.earliest ? date : acc.earliest,
+                                latest: date > acc.latest ? date : acc.latest
+                            }), { earliest: new Date(8640000000000000), latest: new Date(-8640000000000000) });
+
+                            metadata.earliestDate = earliest.toISOString();
+                            metadata.latestDate = latest.toISOString();
                         }
                     }
                 }
 
+                progressBar?.update(85, { stage: 'Column analysis complete' });
                 resolve(Array.from(columns.values()));
             })
             .on('error', reject);
     });
+}
+
+// Then update the generateMetadata function to pass the total rows
+async function generateMetadata(
+    fileName: string, 
+    analysis: CSVAnalysis, 
+    filePath: string, 
+    progressBar?: cliProgress.SingleBar
+): Promise<CSVMetadata> {
+    const stats = await fs.promises.stat(filePath);
+    progressBar?.update(30, { stage: 'Reading creation dates' });
+    
+    const latestCreation = await findLatestCreationDate(filePath);
+    const columns = await analyzeColumns(filePath, analysis.rowCount, progressBar);
+    
+    progressBar?.update(90, { stage: 'Preparing final metadata' });
+    
+    return {
+        fileName: fileName,
+        rowCount: analysis.rowCount,
+        columnCount: analysis.columnCount,
+        sizeInBytes: stats.size,
+        latestCreation: latestCreation,
+        columns: columns
+    };
 }
 
 async function getDestinationFolder(analysis: CSVAnalysis): Promise<string> {
@@ -296,21 +356,6 @@ async function findLatestCreationDate(filePath: string): Promise<string> {
     });
 }
 
-async function generateMetadata(fileName: string, analysis: CSVAnalysis, filePath: string): Promise<CSVMetadata> {
-    const stats = await fs.promises.stat(filePath);
-    const latestCreation = await findLatestCreationDate(filePath);
-    const columns = await analyzeColumns(filePath);
-    
-    return {
-        fileName: fileName,
-        rowCount: analysis.rowCount,
-        columnCount: analysis.columnCount,
-        sizeInBytes: stats.size,
-        latestCreation: latestCreation,
-        columns: columns
-    };
-}
-
 class CSVTransform extends Transform {
     private partialChunk: string = '';
 
@@ -368,7 +413,23 @@ class CSVTransform extends Transform {
 
 async function downloadCSV(fileName: string) {
     try {
+        console.log(`\nProcessing ${fileName}...`);
+        
+        // Create progress bars
+        const progressBars = new cliProgress.MultiBar({
+            clearOnComplete: false,
+            hideCursor: true,
+            format: '{bar} | {percentage}% | {stage}'
+        }, cliProgress.Presets.shades_classic);
+
+        // Create individual progress bars for each stage
+        const downloadBar = progressBars.create(100, 0, { stage: 'Downloading file          ' });
+        const analysisBar = progressBars.create(100, 0, { stage: 'Analyzing file structure  ' });
+        const metadataBar = progressBars.create(100, 0, { stage: 'Generating metadata       ' });
+
         const analysis = await analyzeCSV(fileName);
+        analysisBar.update(100);
+
         const folderType = await getDestinationFolder(analysis);
         const baseFileName = path.basename(fileName);
         
@@ -392,26 +453,39 @@ async function downloadCSV(fileName: string) {
         // Create write stream
         const writeStream = fs.createWriteStream(destinationPath);
 
-        // Download and process the file
+        // Get file size for progress calculation
+        const [fileMetadata] = await storage.bucket(bucketName).file(fileName).getMetadata();
+        const fileSize = parseInt(fileMetadata.size);
+        let downloadedBytes = 0;
+
+        // Download with progress
         await new Promise<void>((resolve, reject) => {
             const readStream = storage.bucket(bucketName).file(fileName).createReadStream();
             readStream
+                .on('data', chunk => {
+                    downloadedBytes += chunk.length;
+                    const progress = (downloadedBytes / fileSize) * 100;
+                    downloadBar.update(Math.min(progress, 100));
+                })
                 .pipe(transformStream)
                 .pipe(writeStream)
                 .on('finish', () => resolve())
                 .on('error', reject);
         });
 
-        // Generate and save metadata
-        const metadata = await generateMetadata(fileName, analysis, destinationPath);
+        downloadBar.update(100);
+
+        // Generate metadata with progress updates
+        metadataBar.update(30);
+        const metadata = await generateMetadata(fileName, analysis, destinationPath, metadataBar);
+        metadataBar.update(60);
         
-        // Create metadata folder within the category folder
+        // Save metadata
         const metadataFolderPath = path.join(downloadPath, 'metadata');
         if (!fs.existsSync(metadataFolderPath)) {
             fs.mkdirSync(metadataFolderPath, { recursive: true });
         }
 
-        // Save metadata file in the metadata subfolder
         const metadataPath = path.join(
             metadataFolderPath,
             `${path.parse(baseFileName).name}.json`
@@ -422,8 +496,12 @@ async function downloadCSV(fileName: string) {
             JSON.stringify(metadata, null, 2)
         );
 
-        console.log(`Downloaded ${fileName} to ${destinationPath} (${analysis.rowCount} rows, ${analysis.columnCount} columns)`);
-        console.log(`Generated metadata file: ${metadataPath}`);
+        metadataBar.update(100);
+        progressBars.stop();
+
+        console.log(`✓ Completed processing ${fileName}`);
+        console.log(`  └─ CSV saved to: ${destinationPath}`);
+        console.log(`  └─ Metadata saved to: ${metadataPath}`);
     } catch (error) {
         console.error(`Failed to process ${fileName}:`, error);
     }
@@ -439,11 +517,14 @@ async function downloadAllCSVs() {
     }
 
     console.log(`Found ${csvFiles.length} CSV files. Starting download...`);
+    console.log('─'.repeat(50));
     
-    for (const file of csvFiles) {
+    for (const [index, file] of csvFiles.entries()) {
+        console.log(`\nProcessing file ${index + 1}/${csvFiles.length}`);
         await downloadCSV(file.name);
     }
     
+    console.log('\n' + '─'.repeat(50));
     console.log('Finished downloading all CSV files');
 }
 
