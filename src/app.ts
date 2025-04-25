@@ -2,6 +2,7 @@ import { Storage } from '@google-cloud/storage';
 import * as dotenv from 'dotenv';
 import * as fs from 'fs';
 import * as path from 'path';
+import { Transform } from 'stream';
 
 dotenv.config();
 
@@ -84,25 +85,73 @@ async function getDestinationFolder(analysis: CSVAnalysis): Promise<string> {
     return 'objects';
 }
 
+class CSVTransform extends Transform {
+    private partialChunk: string = '';
+
+    _transform(chunk: Buffer, encoding: BufferEncoding, callback: (error?: Error | null, data?: any) => void) {
+        let data = this.partialChunk + chunk.toString();
+        let inQuotes = false;
+        let result = '';
+        
+        // Process the data character by character
+        for (let i = 0; i < data.length; i++) {
+            const char = data[i];
+            const nextChar = data[i + 1];
+            
+            // Toggle quote state
+            if (char === '"') {
+                inQuotes = !inQuotes;
+            }
+            
+            // Handle different line break scenarios
+            if (inQuotes) {
+                if (char === '\r' && nextChar === '\n') {
+                    // Windows-style line break (\r\n)
+                    result += ' ';
+                    i++; // Skip the next \n
+                } else if (char === '\n' || char === '\r') {
+                    // Unix (\n) or old Mac (\r) line breaks
+                    result += ' ';
+                } else {
+                    result += char;
+                }
+            } else {
+                result += char;
+            }
+        }
+        
+        // Store the last part of the chunk if we're in quotes
+        if (inQuotes) {
+            this.partialChunk = result;
+            result = '';
+        } else {
+            this.partialChunk = '';
+        }
+        
+        callback(null, result);
+    }
+
+    _flush(callback: (error?: Error | null, data?: any) => void) {
+        if (this.partialChunk) {
+            callback(null, this.partialChunk);
+        } else {
+            callback();
+        }
+    }
+}
+
 async function downloadCSV(fileName: string) {
     try {
-        // First analyze the CSV
         const analysis = await analyzeCSV(fileName);
         const folderType = await getDestinationFolder(analysis);
-        
-        // Get just the base filename without path
         const baseFileName = path.basename(fileName);
         
-        // Create directory if it doesn't exist
         const downloadPath = path.join('./downloads', folderType);
         if (!fs.existsSync(downloadPath)) {
             fs.mkdirSync(downloadPath, { recursive: true });
         }
 
         const destinationPath = path.join(downloadPath, baseFileName);
-        const options = {
-            destination: destinationPath,
-        };
 
         // Check if file exists first
         const [exists] = await storage.bucket(bucketName).file(fileName).exists();
@@ -111,7 +160,22 @@ async function downloadCSV(fileName: string) {
             return;
         }
 
-        await storage.bucket(bucketName).file(fileName).download(options);
+        // Create transform stream to handle line breaks
+        const transformStream = new CSVTransform();
+
+        // Create write stream
+        const writeStream = fs.createWriteStream(destinationPath);
+
+        // Download and process the file
+        await new Promise<void>((resolve, reject) => {
+            const readStream = storage.bucket(bucketName).file(fileName).createReadStream();
+            readStream
+                .pipe(transformStream)
+                .pipe(writeStream)
+                .on('finish', () => resolve())
+                .on('error', reject);
+        });
+
         console.log(`Downloaded ${fileName} to ${destinationPath} (${analysis.rowCount} rows, ${analysis.columnCount} columns)`);
     } catch (error) {
         console.error(`Failed to process ${fileName}:`, error);
