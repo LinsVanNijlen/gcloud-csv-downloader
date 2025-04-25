@@ -149,12 +149,77 @@ async function analyzeCSV(fileName: string): Promise<CSVAnalysis> {
     });
 }
 
-// First modify the function signature to accept the progress bar
+async function analyzeUniqueValues(fileName: string): Promise<Map<string, number>> {
+    const file = storage.bucket(bucketName).file(fileName);
+    const uniqueValues = new Map<string, Set<string>>();
+    let headerProcessed = false;
+    let headers: string[] = [];
+    
+    return new Promise((resolve, reject) => {
+        let buffer = '';
+        let inQuotes = false;
+        let currentField = '';
+        let currentRow: string[] = [];
+
+        file.createReadStream()
+            .on('data', (chunk) => {
+                const data = chunk.toString();
+                
+                for (let i = 0; i < data.length; i++) {
+                    const char = data[i];
+
+                    if (char === '"') {
+                        inQuotes = !inQuotes;
+                    } else if (char === ',' && !inQuotes) {
+                        currentRow.push(currentField);
+                        currentField = '';
+                    } else if ((char === '\n' || char === '\r') && !inQuotes) {
+                        if (char === '\r' && data[i + 1] === '\n') {
+                            i++; // Skip the \n in \r\n
+                        }
+                        
+                        currentRow.push(currentField);
+                        
+                        if (!headerProcessed) {
+                            headers = currentRow.map(h => h.trim());
+                            headers.forEach(header => {
+                                uniqueValues.set(header, new Set());
+                            });
+                            headerProcessed = true;
+                        } else {
+                            headers.forEach((header, index) => {
+                                const value = (currentRow[index] || '').trim().replace(/^"|"$/g, '');
+                                if (value) {
+                                    uniqueValues.get(header)?.add(value);
+                                }
+                            });
+                        }
+                        
+                        currentRow = [];
+                        currentField = '';
+                    } else {
+                        currentField += char;
+                    }
+                }
+                buffer = currentField;
+            })
+            .on('end', () => {
+                // Convert Sets to counts
+                const uniqueCounts = new Map<string, number>();
+                uniqueValues.forEach((values, header) => {
+                    uniqueCounts.set(header, values.size);
+                });
+                resolve(uniqueCounts);
+            })
+            .on('error', reject);
+    });
+}
+
 async function analyzeColumns(
     filePath: string, 
     totalRows: number,
     progressBar?: cliProgress.SingleBar,
-    excludeSystemHeaders: boolean = true // New parameter
+    excludeSystemHeaders: boolean = true
 ): Promise<ColumnMetadata[]> {
     return new Promise((resolve, reject) => {
         const columns: Map<string, ColumnMetadata> = new Map();
@@ -368,13 +433,12 @@ async function analyzeColumns(
     });
 }
 
-// Then update the generateMetadata function to pass the total rows
 async function generateMetadata(
     fileName: string, 
     analysis: CSVAnalysis, 
     filePath: string, 
     progressBar?: cliProgress.SingleBar,
-    excludeSystemHeaders: boolean = true // New parameter
+    excludeSystemHeaders: boolean = true
 ): Promise<CSVMetadata> {
     const stats = await fs.promises.stat(filePath);
     progressBar?.update(30, { stage: 'Reading creation dates' });
@@ -387,7 +451,7 @@ async function generateMetadata(
     return {
         fileName: fileName,
         rowCount: analysis.rowCount,
-        columnCount: columns.length, // Update to use actual analyzed columns length
+        columnCount: columns.length,
         sizeInBytes: stats.size,
         latestCreation: latestCreation,
         columns: columns
@@ -406,7 +470,7 @@ async function getDestinationFolder(analysis: CSVAnalysis): Promise<string> {
 
 async function findLatestCreationDate(filePath: string): Promise<string> {
     return new Promise((resolve, reject) => {
-        let latestDate = new Date(0); // Start with earliest possible date
+        let latestDate = new Date(0);
         let headerProcessed = false;
         let createdonIndex = -1;
 
@@ -417,11 +481,10 @@ async function findLatestCreationDate(filePath: string): Promise<string> {
             .on('data', (chunk) => {
                 buffer += chunk.toString();
                 const lines = buffer.split('\n');
-                buffer = lines.pop() || ''; // Keep the last partial line
+                buffer = lines.pop() || '';
 
                 for (const line of lines) {
                     if (!headerProcessed) {
-                        // Find the index of the createdon column
                         const headers = line.split(',');
                         createdonIndex = headers.findIndex(h => h.trim() === 'createdon');
                         headerProcessed = true;
@@ -443,7 +506,6 @@ async function findLatestCreationDate(filePath: string): Promise<string> {
                 }
             })
             .on('end', () => {
-                // Process any remaining data in buffer
                 if (buffer && createdonIndex !== -1) {
                     const columns = buffer.split(',');
                     if (columns[createdonIndex]) {
@@ -462,46 +524,50 @@ async function findLatestCreationDate(filePath: string): Promise<string> {
     });
 }
 
+// First modify the CSVTransform class to accept low cardinality columns
 class CSVTransform extends Transform {
     private partialChunk: string = '';
     private isFirstChunk: boolean = true;
     private headers: string[] = [];
     private headerIndices: number[] = [];
+    private lowCardinalityColumns: Set<string>;
+
+    constructor(lowCardinalityColumns: string[] = []) {
+        super();
+        this.lowCardinalityColumns = new Set(lowCardinalityColumns);
+    }
 
     _transform(chunk: Buffer, encoding: BufferEncoding, callback: (error?: Error | null, data?: any) => void) {
         let data = this.partialChunk + chunk.toString();
         let inQuotes = false;
         let result = '';
         
-        // Handle headers in the first chunk
         if (this.isFirstChunk) {
             const newlineIndex = data.indexOf('\n');
             if (newlineIndex === -1) {
-                // If we don't have a complete header row, store it and wait for more data
                 this.partialChunk = data;
                 callback();
                 return;
             }
 
-            // Extract and process headers
             const headerRow = data.substring(0, newlineIndex);
             this.headers = this.parseCSVLine(headerRow);
             
-            // Determine which columns to keep (non-system headers)
             this.headerIndices = this.headers
-                .map((header, index) => !SYSTEM_HEADERS.includes(header.toLowerCase()) ? index : -1)
+                .map((header, index) => {
+                    const isSystemHeader = SYSTEM_HEADERS.includes(header.toLowerCase());
+                    const isLowCardinality = this.lowCardinalityColumns.has(header);
+                    return (!isSystemHeader && !isLowCardinality) ? index : -1;
+                })
                 .filter(index => index !== -1);
 
-            // Output filtered header row
             const filteredHeaders = this.headerIndices.map(i => this.headers[i]);
             result = filteredHeaders.join(',') + '\n';
             
-            // Remove the header row from data
             data = data.substring(newlineIndex + 1);
             this.isFirstChunk = false;
         }
 
-        // Process the remaining data
         let currentField = '';
         let currentLine: string[] = [];
         
@@ -512,35 +578,29 @@ class CSVTransform extends Transform {
                 inQuotes = !inQuotes;
                 currentField += char;
             } else if (char === ',' && !inQuotes) {
-                // End of field
                 currentLine.push(currentField);
                 currentField = '';
             } else if ((char === '\n' || char === '\r') && !inQuotes) {
-                // End of line
                 if (char === '\r' && data[i + 1] === '\n') {
-                    i++; // Skip the \n in \r\n
+                    i++;
                 }
                 
                 currentLine.push(currentField);
-                // Filter the line based on headerIndices
                 const filteredLine = this.headerIndices.map(index => currentLine[index] || '');
                 result += filteredLine.join(',') + '\n';
                 
-                // Reset for next line
                 currentLine = [];
                 currentField = '';
             } else if (inQuotes && (char === '\n' || char === '\r')) {
-                // Replace line breaks within quoted fields with space
                 currentField += ' ';
                 if (char === '\r' && data[i + 1] === '\n') {
-                    i++; // Skip the \n in \r\n
+                    i++;
                 }
             } else {
                 currentField += char;
             }
         }
 
-        // Store any incomplete data
         if (inQuotes || currentField || currentLine.length > 0) {
             this.partialChunk = currentField;
             if (currentLine.length > 0) {
@@ -581,25 +641,45 @@ class CSVTransform extends Transform {
             }
         }
         
-        // Make sure to trim the last field to handle any trailing whitespace
         fields.push(currentField.trim());
         
         return fields;
     }
 }
 
+// Then modify the downloadCSV function to use the low cardinality columns
 async function downloadCSV(fileName: string, excludeSystemHeaders: boolean = true) {
     try {
         console.log(`\nProcessing ${fileName}...`);
         
-        // Create progress bars
+        console.log('Analyzing unique values per column...');
+        const uniqueCounts = await analyzeUniqueValues(fileName);
+        
+        const lowCardinalityColumns = Array.from(uniqueCounts.entries())
+            .filter(([header, count]) => 
+                count <= 1 && (!excludeSystemHeaders || !SYSTEM_HEADERS.includes(header.toLowerCase()))
+            );
+        
+        if (lowCardinalityColumns.length > 0) {
+            console.log('\nRemoving columns with constant values (1 or fewer unique values):');
+            console.log('─'.repeat(50));
+            console.log('Column Name'.padEnd(35) + 'Unique Values');
+            console.log('─'.repeat(50));
+            
+            lowCardinalityColumns.forEach(([header, count]) => {
+                console.log(header.padEnd(35) + count);
+            });
+            console.log('─'.repeat(50) + '\n');
+        } else {
+            console.log('\nNo constant value columns to remove.\n');
+        }
+
         const progressBars = new cliProgress.MultiBar({
             clearOnComplete: false,
             hideCursor: true,
             format: '{bar} | {percentage}% | {stage}'
         }, cliProgress.Presets.shades_classic);
 
-        // Create individual progress bars for each stage
         const downloadBar = progressBars.create(100, 0, { stage: 'Downloading file          ' });
         const analysisBar = progressBars.create(100, 0, { stage: 'Analyzing file structure  ' });
         const metadataBar = progressBars.create(100, 0, { stage: 'Generating metadata       ' });
@@ -617,25 +697,22 @@ async function downloadCSV(fileName: string, excludeSystemHeaders: boolean = tru
 
         const destinationPath = path.join(downloadPath, baseFileName);
 
-        // Check if file exists first
         const [exists] = await storage.bucket(bucketName).file(fileName).exists();
         if (!exists) {
             console.error(`File ${fileName} does not exist in bucket ${bucketName}`);
             return;
         }
 
-        // Create transform stream to handle line breaks
-        const transformStream = new CSVTransform();
+        const transformStream = new CSVTransform(
+            lowCardinalityColumns.map(([header]) => header)
+        );
 
-        // Create write stream
         const writeStream = fs.createWriteStream(destinationPath);
 
-        // Get file size for progress calculation
         const [fileMetadata] = await storage.bucket(bucketName).file(fileName).getMetadata();
         const fileSize = parseInt(fileMetadata.size);
         let downloadedBytes = 0;
 
-        // Download with progress
         await new Promise<void>((resolve, reject) => {
             const readStream = storage.bucket(bucketName).file(fileName).createReadStream();
             readStream
@@ -652,7 +729,6 @@ async function downloadCSV(fileName: string, excludeSystemHeaders: boolean = tru
 
         downloadBar.update(100);
 
-        // Generate metadata with progress updates
         metadataBar.update(30);
         const metadata = await generateMetadata(
             fileName, 
@@ -663,7 +739,6 @@ async function downloadCSV(fileName: string, excludeSystemHeaders: boolean = tru
         );
         metadataBar.update(60);
         
-        // Save metadata
         const metadataFolderPath = path.join(downloadPath, 'metadata');
         if (!fs.existsSync(metadataFolderPath)) {
             fs.mkdirSync(metadataFolderPath, { recursive: true });
