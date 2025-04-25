@@ -1,0 +1,23 @@
+{
+  "name": "gcloud-csv-downloader",
+  "version": "1.0.0",
+  "description": "A Node.js application to download CSV files from a Google Cloud Storage bucket.",
+  "main": "src/app.ts",
+  "scripts": {
+    "start": "ts-node src/app.ts",
+    "build": "tsc",
+    "test": "echo \"No tests specified\" && exit 0"
+  },
+  "dependencies": {
+    "@google-cloud/storage": "^5.8.5",
+    "dotenv": "^10.0.0"
+  },
+  "devDependencies": {
+    "ts-node": "^10.0.0",
+    "typescript": "^4.4.4"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "license": "MIT"
+}
