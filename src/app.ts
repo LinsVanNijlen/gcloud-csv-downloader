@@ -36,12 +36,36 @@ interface CSVAnalysis {
     columnCount: number;
 }
 
+interface ColumnMetadata {
+    name: string;
+    dataType: 'GUID' | 'String' | 'Date' | 'Number' | 'Boolean' | 'Unknown';
+    totalCount: number;
+    nonNullCount: number;
+    uniqueCount: number;
+    // String specific
+    maxLength?: number;
+    minLength?: number;
+    // Number specific
+    min?: number;
+    max?: number;
+    average?: number;
+    // Date specific
+    earliestDate?: string;
+    latestDate?: string;
+    // Additional insights
+    isAllUpperCase?: boolean;
+    containsMultipleLines?: boolean;
+    hasSpecialCharacters?: boolean;
+    topValues?: Array<{ value: string; count: number }>;
+}
+
 interface CSVMetadata {
     fileName: string;
     rowCount: number;
     columnCount: number;
     sizeInBytes: number;
-    createdAt: string;
+    latestCreation: string;
+    columns: ColumnMetadata[];
 }
 
 async function analyzeCSV(fileName: string): Promise<CSVAnalysis> {
@@ -83,6 +107,127 @@ async function analyzeCSV(fileName: string): Promise<CSVAnalysis> {
     });
 }
 
+async function analyzeColumns(filePath: string): Promise<ColumnMetadata[]> {
+    return new Promise((resolve, reject) => {
+        const columns: Map<string, ColumnMetadata> = new Map();
+        let headerProcessed = false;
+        let valueMap: Map<string, Set<string>> = new Map();
+        let valueCount: Map<string, Map<string, number>> = new Map();
+
+        const fileStream = fs.createReadStream(filePath);
+        let buffer = '';
+
+        fileStream
+            .on('data', (chunk) => {
+                buffer += chunk.toString();
+                const lines = buffer.split('\n');
+                buffer = lines.pop() || '';
+
+                for (const line of lines) {
+                    if (!headerProcessed) {
+                        // Initialize column metadata
+                        const headers = line.split(',').map(h => h.trim());
+                        headers.forEach(header => {
+                            columns.set(header, {
+                                name: header,
+                                dataType: 'Unknown',
+                                totalCount: 0,
+                                nonNullCount: 0,
+                                uniqueCount: 0,
+                                maxLength: 0,
+                                minLength: undefined,
+                                topValues: []
+                            });
+                            valueMap.set(header, new Set());
+                            valueCount.set(header, new Map());
+                        });
+                        headerProcessed = true;
+                        continue;
+                    }
+
+                    // Process column values
+                    const values = line.split(',');
+                    values.forEach((value, index) => {
+                        const header = Array.from(columns.keys())[index];
+                        if (!header) return;
+
+                        const metadata = columns.get(header)!;
+                        metadata.totalCount++;
+
+                        value = value.trim().replace(/"/g, '');
+                        if (value) {
+                            metadata.nonNullCount++;
+                            valueMap.get(header)?.add(value);
+
+                            // Update value frequency
+                            const frequencyMap = valueCount.get(header)!;
+                            frequencyMap.set(value, (frequencyMap.get(value) || 0) + 1);
+
+                            // Update string metrics
+                            metadata.maxLength = Math.max(metadata.maxLength!, value.length);
+                            metadata.minLength = metadata.minLength === undefined ? 
+                                value.length : Math.min(metadata.minLength, value.length);
+
+                            // Detect data type
+                            if (metadata.dataType === 'Unknown') {
+                                if (/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(value)) {
+                                    metadata.dataType = 'GUID';
+                                } else if (!isNaN(Number(value))) {
+                                    metadata.dataType = 'Number';
+                                } else if (!isNaN(Date.parse(value))) {
+                                    metadata.dataType = 'Date';
+                                } else if (value.toLowerCase() === 'true' || value.toLowerCase() === 'false') {
+                                    metadata.dataType = 'Boolean';
+                                } else {
+                                    metadata.dataType = 'String';
+                                }
+                            }
+
+                            // Additional insights
+                            metadata.isAllUpperCase = value === value.toUpperCase();
+                            metadata.containsMultipleLines = value.includes('\n') || value.includes('\r');
+                            metadata.hasSpecialCharacters = /[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>/?]+/.test(value);
+                        }
+                    });
+                }
+            })
+            .on('end', () => {
+                // Finalize metadata
+                for (const [header, metadata] of columns) {
+                    const uniqueValues = valueMap.get(header)!;
+                    metadata.uniqueCount = uniqueValues.size;
+
+                    // Get top 5 most frequent values
+                    const frequencies = Array.from(valueCount.get(header)!.entries())
+                        .sort((a, b) => b[1] - a[1])
+                        .slice(0, 5)
+                        .map(([value, count]) => ({ value, count }));
+                    metadata.topValues = frequencies;
+
+                    if (metadata.dataType === 'Number') {
+                        const numbers = Array.from(uniqueValues).map(Number).filter(n => !isNaN(n));
+                        if (numbers.length > 0) {
+                            metadata.min = Math.min(...numbers);
+                            metadata.max = Math.max(...numbers);
+                            metadata.average = numbers.reduce((a, b) => a + b) / numbers.length;
+                        }
+                    } else if (metadata.dataType === 'Date') {
+                        const dates = Array.from(uniqueValues)
+                            .map(d => new Date(d))
+                            .filter(d => !isNaN(d.getTime()));
+                        if (dates.length > 0) {
+                            metadata.earliestDate = new Date(Math.min(...dates.map(d => d.getTime()))).toISOString();
+                            metadata.latestDate = new Date(Math.max(...dates.map(d => d.getTime()))).toISOString();
+                        }
+                    }
+                }
+
+                resolve(Array.from(columns.values()));
+            })
+            .on('error', reject);
+    });
+}
+
 async function getDestinationFolder(analysis: CSVAnalysis): Promise<string> {
     if (analysis.rowCount === 0) {
         return 'empty';
@@ -93,15 +238,76 @@ async function getDestinationFolder(analysis: CSVAnalysis): Promise<string> {
     return 'objects';
 }
 
+async function findLatestCreationDate(filePath: string): Promise<string> {
+    return new Promise((resolve, reject) => {
+        let latestDate = new Date(0); // Start with earliest possible date
+        let headerProcessed = false;
+        let createdonIndex = -1;
+
+        const fileStream = fs.createReadStream(filePath);
+        let buffer = '';
+
+        fileStream
+            .on('data', (chunk) => {
+                buffer += chunk.toString();
+                const lines = buffer.split('\n');
+                buffer = lines.pop() || ''; // Keep the last partial line
+
+                for (const line of lines) {
+                    if (!headerProcessed) {
+                        // Find the index of the createdon column
+                        const headers = line.split(',');
+                        createdonIndex = headers.findIndex(h => h.trim() === 'createdon');
+                        headerProcessed = true;
+                        continue;
+                    }
+
+                    if (createdonIndex !== -1) {
+                        const columns = line.split(',');
+                        if (columns[createdonIndex]) {
+                            const dateStr = columns[createdonIndex].trim().replace(/"/g, '');
+                            if (dateStr) {
+                                const date = new Date(dateStr);
+                                if (!isNaN(date.getTime()) && date > latestDate) {
+                                    latestDate = date;
+                                }
+                            }
+                        }
+                    }
+                }
+            })
+            .on('end', () => {
+                // Process any remaining data in buffer
+                if (buffer && createdonIndex !== -1) {
+                    const columns = buffer.split(',');
+                    if (columns[createdonIndex]) {
+                        const dateStr = columns[createdonIndex].trim().replace(/"/g, '');
+                        if (dateStr) {
+                            const date = new Date(dateStr);
+                            if (!isNaN(date.getTime()) && date > latestDate) {
+                                latestDate = date;
+                            }
+                        }
+                    }
+                }
+                resolve(latestDate.toISOString());
+            })
+            .on('error', reject);
+    });
+}
+
 async function generateMetadata(fileName: string, analysis: CSVAnalysis, filePath: string): Promise<CSVMetadata> {
     const stats = await fs.promises.stat(filePath);
+    const latestCreation = await findLatestCreationDate(filePath);
+    const columns = await analyzeColumns(filePath);
     
     return {
         fileName: fileName,
         rowCount: analysis.rowCount,
         columnCount: analysis.columnCount,
         sizeInBytes: stats.size,
-        createdAt: new Date().toISOString()
+        latestCreation: latestCreation,
+        columns: columns
     };
 }
 
