@@ -36,6 +36,14 @@ interface CSVAnalysis {
     columnCount: number;
 }
 
+interface CSVMetadata {
+    fileName: string;
+    rowCount: number;
+    columnCount: number;
+    sizeInBytes: number;
+    createdAt: string;
+}
+
 async function analyzeCSV(fileName: string): Promise<CSVAnalysis> {
     const file = storage.bucket(bucketName).file(fileName);
     let rowCount = 0;
@@ -83,6 +91,18 @@ async function getDestinationFolder(analysis: CSVAnalysis): Promise<string> {
         return 'picklists';
     }
     return 'objects';
+}
+
+async function generateMetadata(fileName: string, analysis: CSVAnalysis, filePath: string): Promise<CSVMetadata> {
+    const stats = await fs.promises.stat(filePath);
+    
+    return {
+        fileName: fileName,
+        rowCount: analysis.rowCount,
+        columnCount: analysis.columnCount,
+        sizeInBytes: stats.size,
+        createdAt: new Date().toISOString()
+    };
 }
 
 class CSVTransform extends Transform {
@@ -176,7 +196,28 @@ async function downloadCSV(fileName: string) {
                 .on('error', reject);
         });
 
+        // Generate and save metadata
+        const metadata = await generateMetadata(fileName, analysis, destinationPath);
+        
+        // Create metadata folder within the category folder
+        const metadataFolderPath = path.join(downloadPath, 'metadata');
+        if (!fs.existsSync(metadataFolderPath)) {
+            fs.mkdirSync(metadataFolderPath, { recursive: true });
+        }
+
+        // Save metadata file in the metadata subfolder
+        const metadataPath = path.join(
+            metadataFolderPath,
+            `${path.parse(baseFileName).name}.json`
+        );
+        
+        await fs.promises.writeFile(
+            metadataPath, 
+            JSON.stringify(metadata, null, 2)
+        );
+
         console.log(`Downloaded ${fileName} to ${destinationPath} (${analysis.rowCount} rows, ${analysis.columnCount} columns)`);
+        console.log(`Generated metadata file: ${metadataPath}`);
     } catch (error) {
         console.error(`Failed to process ${fileName}:`, error);
     }
