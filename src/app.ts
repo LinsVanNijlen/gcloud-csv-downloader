@@ -524,13 +524,14 @@ async function findLatestCreationDate(filePath: string): Promise<string> {
     });
 }
 
-// First modify the CSVTransform class to accept low cardinality columns
+// First modify the CSVTransform class to accept low cardinality columns and track processed rows
 class CSVTransform extends Transform {
     private partialChunk: string = '';
     private isFirstChunk: boolean = true;
     private headers: string[] = [];
     private headerIndices: number[] = [];
     private lowCardinalityColumns: Set<string>;
+    private rowCount: number = 0;
 
     constructor(lowCardinalityColumns: string[] = []) {
         super();
@@ -589,6 +590,10 @@ class CSVTransform extends Transform {
                 const filteredLine = this.headerIndices.map(index => currentLine[index] || '');
                 result += filteredLine.join(',') + '\n';
                 
+                if (!this.isFirstChunk) {
+                    this.rowCount++;
+                }
+                
                 currentLine = [];
                 currentField = '';
             } else if (inQuotes && (char === '\n' || char === '\r')) {
@@ -645,9 +650,13 @@ class CSVTransform extends Transform {
         
         return fields;
     }
+
+    getRowCount(): number {
+        return this.rowCount;
+    }
 }
 
-// Then modify the downloadCSV function to use the low cardinality columns
+// Then modify the downloadCSV function to use the low cardinality columns and updated row count
 async function downloadCSV(fileName: string, excludeSystemHeaders: boolean = true) {
     try {
         console.log(`\nProcessing ${fileName}...`);
@@ -730,6 +739,9 @@ async function downloadCSV(fileName: string, excludeSystemHeaders: boolean = tru
         downloadBar.update(100);
 
         metadataBar.update(30);
+        // Update analysis with correct row count
+        analysis.rowCount = transformStream.getRowCount();
+        
         const metadata = await generateMetadata(
             fileName, 
             analysis, 
@@ -789,6 +801,46 @@ async function downloadAllCSVs() {
 async function main() {
     console.log('Starting CSV download process...');
     await downloadAllCSVs();
+    
+    // Generate summary CSV
+    console.log('\nGenerating summary...');
+    const summaryPath = path.join('./downloads', 'summary.csv');
+    
+    // Write header
+    await fs.promises.writeFile(summaryPath, 'Filename,FileType,RecordCount,LastCreationDate\n');
+    
+    // Process metadata files
+    const objectsPath = path.join('./downloads/objects/metadata');
+    const picklistsPath = path.join('./downloads/picklists/metadata');
+    
+    for (const folderPath of [objectsPath, picklistsPath]) {
+        if (!fs.existsSync(folderPath)) continue;
+        
+        const files = await fs.promises.readdir(folderPath);
+        for (const file of files) {
+            if (path.extname(file) === '.json') {
+                const metadata = JSON.parse(
+                    await fs.promises.readFile(path.join(folderPath, file), 'utf8')
+                );
+                
+                if (metadata.rowCount > 0) {
+                    const fileType = metadata.rowCount >= 30 ? 'Object' : 'Picklist';
+                    // Extract just the filename without directory or extension
+                    const baseFileName = path.basename(metadata.fileName, '.csv').replace(/^.*\//, '');
+                    const summary = [
+                        baseFileName,
+                        fileType,
+                        metadata.rowCount,
+                        new Date(metadata.latestCreation).toISOString().split('T')[0]
+                    ].join(',');
+                    
+                    await fs.promises.appendFile(summaryPath, summary + '\n');
+                }
+            }
+        }
+    }
+    
+    console.log(`Summary saved to: ${summaryPath}`);
 }
 
 main();
