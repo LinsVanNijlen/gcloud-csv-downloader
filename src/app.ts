@@ -909,17 +909,146 @@ async function main() {
             const baseFieldName = rel.sourceField.toLowerCase().endsWith('id') ? 
                 rel.sourceField.slice(0, -2) : rel.sourceField;
             
+            // Get source field metadata and top values
+            // Try objects directory first, then picklists
+            let sourceMetadataPath = path.join('./downloads/objects/metadata', `${rel.sourceEntity}.json`);
+            if (!fs.existsSync(sourceMetadataPath)) {
+                sourceMetadataPath = path.join('./downloads/picklists/metadata', `${rel.sourceEntity}.json`);
+                if (!fs.existsSync(sourceMetadataPath)) {
+                    console.log(`\nSkipping relationship: ${rel.sourceEntity}.${rel.sourceField} - Metadata file not found`);
+                    continue;
+                }
+            }
+
+            const sourceMetadata = JSON.parse(
+                await fs.promises.readFile(sourceMetadataPath, 'utf8')
+            );
+
+            const sourceFieldMetadata = sourceMetadata.columns.find(
+                (col: { name: string }) => col.name === rel.sourceField
+            );
+            const topValues = sourceFieldMetadata?.topValues || [];
+
+            console.log(`\nAnalyzing relationship: ${rel.sourceEntity}.${rel.sourceField}`);
+            if (topValues.length > 0) {
+                console.log('Top values from source field:');
+                console.log('─'.repeat(50));
+                console.log('Value'.padEnd(38) + 'Count');
+                console.log('─'.repeat(50));
+                topValues.forEach(({value, count}: { value: string; count: number }) => {
+                    console.log(`${value.padEnd(38)}${count}`);
+                });
+                console.log('─'.repeat(50));
+            }
+            
             // Look for matching target entity and its identifier
             const targetEntity = entityIdentifiers.has(baseFieldName.toLowerCase()) ? 
                 baseFieldName : '';
             const targetField = targetEntity ? 
                 entityIdentifiers.get(baseFieldName.toLowerCase()) : '';
-            
-            // Write to relationships CSV
-            await fs.promises.appendFile(
-                relationshipsPath,
-                `${rel.sourceEntity},${rel.sourceField},${targetEntity},${targetField}\n`
-            );
+
+            if (targetEntity) {
+                // Find the CSV file for the target entity
+                const targetCsvPath = path.join('./downloads/objects', `${targetEntity}.csv`);
+                const picklistCsvPath = path.join('./downloads/picklists', `${targetEntity}.csv`);
+                
+                let csvPath = '';
+                if (fs.existsSync(targetCsvPath)) {
+                    csvPath = targetCsvPath;
+                } else if (fs.existsSync(picklistCsvPath)) {
+                    csvPath = picklistCsvPath;
+                }
+
+                if (csvPath) {
+                    // Read the CSV file and check all identifiers
+                    const fileStream = fs.createReadStream(csvPath);
+                    let buffer = '';
+                    let isFirstLine = true;
+                    let headers: string[] = [];
+                    let identifierIndex = -1;
+                    let foundMatch = false;
+
+                    const parseCSVLine = (line: string): string[] => {
+                        const fields: string[] = [];
+                        let currentField = '';
+                        let inQuotes = false;
+
+                        for (let i = 0; i < line.length; i++) {
+                            const char = line[i];
+                            if (char === '"') {
+                                inQuotes = !inQuotes;
+                            } else if (char === ',' && !inQuotes) {
+                                fields.push(currentField.trim());
+                                currentField = '';
+                            } else {
+                                currentField += char;
+                            }
+                        }
+                        fields.push(currentField.trim());
+                        return fields.map(field => field.replace(/^"|"$/g, '')); // Remove surrounding quotes
+                    };
+
+                    console.log(`\nFound matching entity: ${targetEntity}`);
+                    console.log(`Checking ${targetField} values against source field values...`);
+
+                    for await (const chunk of fileStream) {
+                        buffer += chunk.toString();
+                        const lines = buffer.split('\n');
+                        buffer = lines.pop() || ''; // Keep the last partial line
+
+                        if (isFirstLine && lines.length > 0) {
+                            headers = parseCSVLine(lines[0]);
+                            identifierIndex = headers.findIndex(h => h === targetField);
+                            isFirstLine = false;
+                        }
+
+                        if (identifierIndex !== -1) {
+                            for (const line of lines) {
+                                if (!line.trim()) continue;
+                                const values = parseCSVLine(line);
+                                const identifierValue = values[identifierIndex];
+                                
+                                if (identifierValue && topValues.some((tv: { value: string; }) => tv.value === identifierValue)) {
+                                    console.log(`✓ Found matching identifier value: ${identifierValue}`);
+                                    foundMatch = true;
+                                    break;
+                                }
+                            }
+
+                            if (foundMatch) break;
+                        }
+                    }
+
+                    if (!foundMatch) {
+                        console.log(`✗ No matching identifier values found in ${targetField}`);
+                        // Write to relationships CSV with only source information
+                        await fs.promises.appendFile(
+                            relationshipsPath,
+                            `${rel.sourceEntity},${rel.sourceField},,\n`
+                        );
+                    } else {
+                        // Write complete relationship only when match is found
+                        await fs.promises.appendFile(
+                            relationshipsPath,
+                            `${rel.sourceEntity},${rel.sourceField},${targetEntity},${targetField}\n`
+                        );
+                    }
+                } else {
+                    console.log(`✗ No CSV file found for target entity: ${targetEntity}`);
+                    // Write to relationships CSV with only source information even when target file is missing
+                    await fs.promises.appendFile(
+                        relationshipsPath,
+                        `${rel.sourceEntity},${rel.sourceField},,\n`
+                    );
+                }
+            } else {
+                console.log(`✗ No matching target entity found for field: ${rel.sourceField}`);
+                // Write to relationships CSV when no target entity is found
+                await fs.promises.appendFile(
+                    relationshipsPath,
+                    `${rel.sourceEntity},${rel.sourceField},,\n`
+                );
+            }
         }
         
         console.log('─'.repeat(90));
