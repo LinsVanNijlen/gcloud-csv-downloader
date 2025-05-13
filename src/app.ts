@@ -880,15 +880,45 @@ async function main() {
         const relationshipsPath = path.join('./downloads', 'relationships.csv');
         await fs.promises.writeFile(
             relationshipsPath, 
-            'SourceEntity,SourceField\n'
+            'SourceEntity,SourceField,TargetEntity,TargetField\n'
         );
         
+        // Create a map of entities and their identifiers
+        const entityIdentifiers = new Map<string, string>();
+        
+        // First pass: collect all entity names and their identifiers
+        for (const folderPath of [objectsPath, picklistsPath]) {
+            if (!fs.existsSync(folderPath)) continue;
+            
+            const files = await fs.promises.readdir(folderPath);
+            for (const file of files) {
+                if (path.extname(file) === '.json') {
+                    const metadata = JSON.parse(
+                        await fs.promises.readFile(path.join(folderPath, file), 'utf8')
+                    );
+                    const baseFileName = path.basename(metadata.fileName, '.csv').replace(/^.*\//, '');
+                    const identifier = findIdentifierField(metadata);
+                    if (identifier) {
+                        entityIdentifiers.set(baseFileName.toLowerCase(), identifier);
+                    }
+                }
+            }
+        }
+        
         for (const rel of relationshipFields) {
+            const baseFieldName = rel.sourceField.toLowerCase().endsWith('id') ? 
+                rel.sourceField.slice(0, -2) : rel.sourceField;
+            
+            // Look for matching target entity and its identifier
+            const targetEntity = entityIdentifiers.has(baseFieldName.toLowerCase()) ? 
+                baseFieldName : '';
+            const targetField = targetEntity ? 
+                entityIdentifiers.get(baseFieldName.toLowerCase()) : '';
             
             // Write to relationships CSV
             await fs.promises.appendFile(
                 relationshipsPath,
-                `${rel.sourceEntity},${rel.sourceField}\n`
+                `${rel.sourceEntity},${rel.sourceField},${targetEntity},${targetField}\n`
             );
         }
         
