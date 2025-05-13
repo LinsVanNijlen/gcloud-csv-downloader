@@ -814,6 +814,12 @@ async function main() {
     const objectsPath = path.join('./downloads/objects/metadata');
     const picklistsPath = path.join('./downloads/picklists/metadata');
     
+    // Store all found relationship fields
+    const relationshipFields: Array<{
+        sourceEntity: string,
+        sourceField: string
+    }> = [];
+    
     for (const folderPath of [objectsPath, picklistsPath]) {
         if (!fs.existsSync(folderPath)) continue;
         
@@ -841,12 +847,57 @@ async function main() {
                     ].join(',');
                     
                     await fs.promises.appendFile(summaryPath, summary + '\n');
+                    
+                    // Find all non-identifier GUID fields (potential foreign keys)
+                    const foreignKeyFields = metadata.columns.filter((col: { dataType: string; name: string; }) => 
+                        col.dataType === 'GUID' && col.name !== identifier
+                    );
+                    
+                    // Process each non-identifier GUID field
+                    for (const foreignKeyField of foreignKeyFields) {
+                        relationshipFields.push({
+                            sourceEntity: baseFileName,
+                            sourceField: foreignKeyField.name
+                        });
+                    }
                 }
             }
         }
     }
     
     console.log(`Summary saved to: ${summaryPath}`);
+    
+    // Process all the non-identifier GUID fields (potential relationships)
+    console.log('\nAnalyzing non-identifier GUID fields (potential relationships):');
+    if (relationshipFields.length > 0) {
+        // Sort relationships by source entity and then field name
+        relationshipFields.sort((a, b) => 
+            a.sourceEntity.localeCompare(b.sourceEntity) || 
+            a.sourceField.localeCompare(b.sourceField)
+        );
+        
+        // Create a relationships CSV file
+        const relationshipsPath = path.join('./downloads', 'relationships.csv');
+        await fs.promises.writeFile(
+            relationshipsPath, 
+            'SourceEntity,SourceField\n'
+        );
+        
+        for (const rel of relationshipFields) {
+            
+            // Write to relationships CSV
+            await fs.promises.appendFile(
+                relationshipsPath,
+                `${rel.sourceEntity},${rel.sourceField}\n`
+            );
+        }
+        
+        console.log('─'.repeat(90));
+        console.log(`Found ${relationshipFields.length} potential relationship fields`);
+        console.log(`Relationship data saved to: ${relationshipsPath}`);
+    } else {
+        console.log('No non-identifier GUID fields found.');
+    }
 }
 
 // Helper function to find the GUID field with most unique values
