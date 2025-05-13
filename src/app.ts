@@ -906,6 +906,8 @@ async function main() {
         }
         
         for (const rel of relationshipFields) {
+            let foundMatch = false;
+
             const baseFieldName = rel.sourceField.toLowerCase().endsWith('id') ? 
                 rel.sourceField.slice(0, -2) : rel.sourceField;
             
@@ -948,10 +950,11 @@ async function main() {
                 entityIdentifiers.get(baseFieldName.toLowerCase()) : '';
 
             if (targetEntity) {
+
                 // Find the CSV file for the target entity
                 const targetCsvPath = path.join('./downloads/objects', `${targetEntity}.csv`);
                 const picklistCsvPath = path.join('./downloads/picklists', `${targetEntity}.csv`);
-                
+
                 let csvPath = '';
                 if (fs.existsSync(targetCsvPath)) {
                     csvPath = targetCsvPath;
@@ -966,7 +969,6 @@ async function main() {
                     let isFirstLine = true;
                     let headers: string[] = [];
                     let identifierIndex = -1;
-                    let foundMatch = false;
 
                     const parseCSVLine = (line: string): string[] => {
                         const fields: string[] = [];
@@ -1019,14 +1021,7 @@ async function main() {
                         }
                     }
 
-                    if (!foundMatch) {
-                        console.log(`✗ No matching identifier values found in ${targetField}`);
-                        // Write to relationships CSV with only source information
-                        await fs.promises.appendFile(
-                            relationshipsPath,
-                            `${rel.sourceEntity},${rel.sourceField},,\n`
-                        );
-                    } else {
+                    if (foundMatch) {
                         // Write complete relationship only when match is found
                         await fs.promises.appendFile(
                             relationshipsPath,
@@ -1041,13 +1036,107 @@ async function main() {
                         `${rel.sourceEntity},${rel.sourceField},,\n`
                     );
                 }
-            } else {
-                console.log(`✗ No matching target entity found for field: ${rel.sourceField}`);
-                // Write to relationships CSV when no target entity is found
-                await fs.promises.appendFile(
-                    relationshipsPath,
-                    `${rel.sourceEntity},${rel.sourceField},,\n`
-                );
+            }
+
+            if (!foundMatch) {
+                // Get list of all CSV files from both directories
+                const objectFiles = fs.existsSync('./downloads/objects') ? 
+                    await fs.promises.readdir('./downloads/objects') : [];
+                const picklistFiles = fs.existsSync('./downloads/picklists') ? 
+                    await fs.promises.readdir('./downloads/picklists') : [];
+
+                // Get file sizes and create sorted list
+                const allFiles = await Promise.all([
+                    ...objectFiles.map(async file => ({
+                        path: path.join('./downloads/objects', file),
+                        size: (await fs.promises.stat(path.join('./downloads/objects', file))).size,
+                        entity: path.basename(file, '.csv')
+                    })),
+                    ...picklistFiles.map(async file => ({
+                        path: path.join('./downloads/picklists', file),
+                        size: (await fs.promises.stat(path.join('./downloads/picklists', file))).size,
+                        entity: path.basename(file, '.csv')
+                    }))
+                ]);
+
+                // Sort by file size (ascending)
+                allFiles.sort((a, b) => a.size - b.size);
+
+                console.log('\nChecking remaining CSV files for matches (ordered by size):');
+                for (const file of allFiles) {
+                    // Skip source entity and already checked target
+                    if (file.entity === targetEntity) continue;
+                    
+                    // Get metadata for potential target
+                    const metadataPath = path.join(
+                        path.dirname(file.path),
+                        'metadata',
+                        `${file.entity}.json`
+                    );
+                    
+                    if (!fs.existsSync(metadataPath)) continue;
+
+                    const targetMetadata = JSON.parse(
+                        await fs.promises.readFile(metadataPath, 'utf8')
+                    );
+                    const potentialIdentifier = findIdentifierField(targetMetadata);
+                    
+                    if (!potentialIdentifier) continue;
+
+                    console.log(`\nChecking ${file.entity}.${potentialIdentifier}...`);
+
+                    // Read the CSV file and check all identifiers
+                    const fileStream = fs.createReadStream(file.path);
+                    let buffer = '';
+                    let isFirstLine = true;
+                    let headers: string[] = [];
+                    let identifierIndex = -1;
+
+                    for await (const chunk of fileStream) {
+                        buffer += chunk.toString();
+                        const lines = buffer.split('\n');
+                        buffer = lines.pop() || '';
+
+                        if (isFirstLine && lines.length > 0) {
+                            headers = lines[0].split(',').map(h => h.trim().replace(/^"|"$/g, ''));
+                            identifierIndex = headers.findIndex(h => h === potentialIdentifier);
+                            isFirstLine = false;
+                        }
+
+                        if (identifierIndex !== -1) {
+                            for (const line of lines) {
+                                if (!line.trim()) continue;
+                                const values = line.split(',').map(v => v.trim().replace(/^"|"$/g, ''));
+                                const identifierValue = values[identifierIndex];
+                                
+                                if (identifierValue && topValues.some((tv: { value: string; }) => tv.value === identifierValue)) {
+                                    console.log(`✓ Found matching identifier value: ${identifierValue}`);
+                                    console.log(`✓ Discovered relationship: ${rel.sourceEntity}.${rel.sourceField} -> ${file.entity}.${potentialIdentifier}`);
+                                    
+                                    await fs.promises.appendFile(
+                                        relationshipsPath,
+                                        `${rel.sourceEntity},${rel.sourceField},${file.entity},${potentialIdentifier}\n`
+                                    );
+                                    
+                                    foundMatch = true;
+                                    break;
+                                }
+                            }
+
+                            if (foundMatch) break;
+                        }
+                    }
+
+                    if (foundMatch) break;
+                }
+
+                if (!foundMatch) {
+                    console.log('✗ No matches found in any remaining files');
+                    await fs.promises.appendFile(
+                        relationshipsPath,
+                        `${rel.sourceEntity},${rel.sourceField},,\n`
+                    );
+                }
             }
         }
         
