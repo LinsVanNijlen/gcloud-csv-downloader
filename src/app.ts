@@ -801,7 +801,7 @@ async function downloadAllCSVs() {
 async function main() {
     console.log('Starting CSV download process...');
     //await downloadAllCSVs();
-    await downloadCSV('dump-test/account.csv', true); // Example file for testing
+    //await downloadCSV('dump-test/account.csv', true); // Example file for testing
     
     // Generate summary CSV
     console.log('\nGenerating summary...');
@@ -857,12 +857,35 @@ function findIdentifierField(metadata: CSVMetadata): string {
     // If no GUID fields, return empty string
     if (guidColumns.length === 0) return '';
     
-    // Find the GUID field with the highest unique count
-    const identifierColumn = guidColumns.reduce((maxColumn, currentColumn) => {
-        return currentColumn.uniqueCount > maxColumn.uniqueCount ? currentColumn : maxColumn;
-    }, guidColumns[0]);
+    // First sort by unique count in descending order
+    guidColumns.sort((a, b) => b.uniqueCount - a.uniqueCount);
     
-    return identifierColumn.name;
+    // Get the highest unique count
+    const maxUniqueCount = guidColumns[0].uniqueCount;
+    
+    // Find all columns with this max count
+    const candidateColumns = guidColumns.filter(col => col.uniqueCount === maxUniqueCount);
+    
+    // If only one column has the highest count, return it
+    if (candidateColumns.length === 1) {
+        return candidateColumns[0].name;
+    }
+    
+    // Extract filename from the metadata
+    const baseFileName = path.basename(metadata.fileName, '.csv').replace(/^.*\//, '');
+    
+    // Look for columns containing the file name
+    const fileNameMatch = candidateColumns.find(col => 
+        col.name.toLowerCase().includes(baseFileName.toLowerCase())
+    );
+    
+    // If found a match with filename, return it
+    if (fileNameMatch) {
+        return fileNameMatch.name;
+    }
+    
+    // Fallback: return the first column with highest unique count
+    return candidateColumns[0].name;
 }
 
 main();
