@@ -800,14 +800,15 @@ async function downloadAllCSVs() {
 
 async function main() {
     console.log('Starting CSV download process...');
-    await downloadAllCSVs();
+    //await downloadAllCSVs();
+    await downloadCSV('dump-test/account.csv', true); // Example file for testing
     
     // Generate summary CSV
     console.log('\nGenerating summary...');
     const summaryPath = path.join('./downloads', 'summary.csv');
     
-    // Write header
-    await fs.promises.writeFile(summaryPath, 'Filename,FileType,RecordCount,LastCreationDate\n');
+    // Write header - add Identifier column
+    await fs.promises.writeFile(summaryPath, 'Filename,FileType,RecordCount,LastCreationDate,Identifier\n');
     
     // Process metadata files
     const objectsPath = path.join('./downloads/objects/metadata');
@@ -827,11 +828,16 @@ async function main() {
                     const fileType = metadata.rowCount >= 30 ? 'Object' : 'Picklist';
                     // Extract just the filename without directory or extension
                     const baseFileName = path.basename(metadata.fileName, '.csv').replace(/^.*\//, '');
+                    
+                    // Find the GUID identifier with most unique values
+                    const identifier = findIdentifierField(metadata);
+                    
                     const summary = [
                         baseFileName,
                         fileType,
                         metadata.rowCount,
-                        new Date(metadata.latestCreation).toISOString().split('T')[0]
+                        new Date(metadata.latestCreation).toISOString().split('T')[0],
+                        identifier || ''
                     ].join(',');
                     
                     await fs.promises.appendFile(summaryPath, summary + '\n');
@@ -841,6 +847,22 @@ async function main() {
     }
     
     console.log(`Summary saved to: ${summaryPath}`);
+}
+
+// Helper function to find the GUID field with most unique values
+function findIdentifierField(metadata: CSVMetadata): string {
+    // Filter columns to find GUID fields
+    const guidColumns = metadata.columns.filter(col => col.dataType === 'GUID');
+    
+    // If no GUID fields, return empty string
+    if (guidColumns.length === 0) return '';
+    
+    // Find the GUID field with the highest unique count
+    const identifierColumn = guidColumns.reduce((maxColumn, currentColumn) => {
+        return currentColumn.uniqueCount > maxColumn.uniqueCount ? currentColumn : maxColumn;
+    }, guidColumns[0]);
+    
+    return identifierColumn.name;
 }
 
 main();
