@@ -1260,6 +1260,117 @@ ${csvImportOptions}
     }
 }
 
+async function generateTargetConfigs(objectsPath: string, picklistsPath: string): Promise<void> {
+    const targetConfigPath = path.join('./downloads', 'target-configs');
+    if (!fs.existsSync(targetConfigPath)) {
+        fs.mkdirSync(targetConfigPath, { recursive: true });
+    }
+
+    // Read relationships file
+    const relationshipsPath = path.join('./downloads', 'relationships.csv');
+    const relationshipsContent = await fs.promises.readFile(relationshipsPath, 'utf8');
+    const relationships = relationshipsContent
+        .split('\n')
+        .slice(1) // Skip header
+        .filter(line => line.trim())
+        .map(line => {
+            const [sourceEntity, sourceField, targetEntity, targetField] = line.split(',');
+            return { sourceEntity, sourceField, targetEntity, targetField };
+        });
+
+    // Group relationships by source entity
+    const relationshipsByEntity = relationships.reduce((acc, rel) => {
+        if (!acc[rel.sourceEntity]) {
+            acc[rel.sourceEntity] = [];
+        }
+        if (rel.targetEntity && rel.targetField) {
+            acc[rel.sourceEntity].push(rel);
+        }
+        return acc;
+    }, {} as Record<string, typeof relationships>);
+
+    for (const folderPath of [objectsPath, picklistsPath]) {
+        if (!fs.existsSync(folderPath)) continue;
+        
+        const files = await fs.promises.readdir(folderPath);
+        for (const file of files) {
+            if (path.extname(file) === '.json') {
+                const metadata = JSON.parse(
+                    await fs.promises.readFile(path.join(folderPath, file), 'utf8')
+                );
+
+                if (metadata.rowCount > 0) {
+                    const baseFileName = path.basename(metadata.fileName, '.csv').replace(/^.*\//, '');
+                    const entityRelationships = relationshipsByEntity[baseFileName] || [];
+                    
+                    // Generate imports
+                    const imports = [`import { lookupRef, LookupRef, targetConfig, targetSourceConfig } from "../../../migration-core";`,
+                        `import { assignInboundFields, defaultInboundTargetConfig, inboundConfigValidator } from "../../utils/migration-utils";`,
+                        `import { ${baseFileName}Source } from "../source-configs/${baseFileName}";`,
+                        `import { SfdcRow } from "../table-types";`
+                    ];
+
+                    // Add imports for related entities
+                    const uniqueTargetEntities = [...new Set(entityRelationships.map(r => r.targetEntity))];
+                    uniqueTargetEntities.forEach(targetEntity => {
+                        // Skip importing own class to avoid circular dependencies
+                        if (targetEntity !== baseFileName) {
+                            imports.push(`import { Dyn__${targetEntity}__c } from "./${targetEntity}";`);
+                        }
+                    });
+
+                    // Generate class definition
+                    const classProps = [`  public Dyn__${baseFileName}Key__c?: string = undefined;`];
+                    entityRelationships.forEach(rel => {
+                        classProps.push(`  public Dyn__${rel.sourceField}__c: LookupRef<Dyn__${rel.targetEntity}__c> | null | undefined = undefined;`);
+                    });
+
+                    const classDefinition = `\nexport class Dyn__${baseFileName}__c extends SfdcRow {\n${classProps.join('\n')}\n}`;
+
+                    // Generate lookup assignments
+                    const lookupAssignments = entityRelationships.map(rel => 
+                        `    record.Dyn__${rel.sourceField}__c = lookupRef(\`\${${baseFileName}.${rel.sourceField}}\`);`
+                    );
+
+                    // Generate target config
+                    const targetConfigContent = `\nexport const Dyn__${baseFileName}__c_Target = targetConfig({
+  ...defaultInboundTargetConfig,
+  targetTableName: "Dyn__${baseFileName}__c",
+  sources: {
+    ${baseFileName}: targetSourceConfig({
+      sourceConfig: ${baseFileName}Source,
+      sourceKey: "${baseFileName}Key",
+    }),
+  },
+}).setRowDigester<Dyn__${baseFileName}__c>({
+  validate: inboundConfigValidator([${baseFileName}Source], []),
+  digest: async (context) => {
+    const {
+      sources: { ${baseFileName} },
+      key,
+    } = context;
+
+    const record: Dyn__${baseFileName}__c = {
+      ...(await assignInboundFields(${baseFileName}Source, ${baseFileName})),
+    };
+
+${lookupAssignments.join('\n')}
+
+    record.Dyn__${baseFileName}Key__c = key;
+    return record;
+  }
+})`;
+
+                    const configContent = [...imports, classDefinition, targetConfigContent].join('\n');
+                    const configFilePath = path.join(targetConfigPath, `${baseFileName}.ts`);
+                    await fs.promises.writeFile(configFilePath, configContent);
+                    console.log(`Generated target config: ${configFilePath}`);
+                }
+            }
+        }
+    }
+}
+
 // Update the main function to use the new functions:
 async function main() {
     console.log('Starting CSV download process...');
@@ -1276,21 +1387,25 @@ async function main() {
     const csvHeaders = await generateCsvHeaders(objectsPath, picklistsPath);
     await fs.promises.writeFile(csvHeaders.path, csvHeaders.content);
 
-    // Generate source configs
-    console.log('\nGenerating source configurations...');
-    await generateSourceConfigs(objectsPath, picklistsPath);
-
     // Collect relationship fields and generate summary
-    /*const relationshipFields = await collectRelationshipFields(objectsPath, picklistsPath, summaryPath);
+    const relationshipFields = await collectRelationshipFields(objectsPath, picklistsPath, summaryPath);
     console.log(`Summary saved to: ${summaryPath}`);
     
     // Process relationships
-    console.log('\nAnalyzing non-identifier GUID fields (potential relationships):');
+    /*console.log('\nAnalyzing non-identifier GUID fields (potential relationships):');
     if (relationshipFields.length > 0) {
         await processRelationships(relationshipFields, objectsPath, picklistsPath);
     } else {
         console.log('No non-identifier GUID fields found.');
     }*/
+
+    // Generate source configs
+    console.log('\nGenerating source configurations...');
+    await generateSourceConfigs(objectsPath, picklistsPath);
+
+    // Generate target configs
+    console.log('\nGenerating target configurations...');
+    await generateTargetConfigs(objectsPath, picklistsPath);
 }
 
 // Helper function to find the GUID field with most unique values
