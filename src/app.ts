@@ -813,10 +813,53 @@ async function main() {
     // Write header - add Identifier column
     await fs.promises.writeFile(summaryPath, 'Filename,FileType,RecordCount,LastCreationDate,Identifier\n');
     
+    const csvHeadersPath = path.join('./downloads', 'csv_headers.ts');
+    const csvHeadersStart = `import type { FromProperties } from '../utils/types.js';
+
+export const inboundCsvHeaders = {`;
+
+    const csvHeadersEnd = `} as const;
+    
+export type InboundCsvFileName = keyof typeof inboundCsvHeaders;
+export function InboundCsvFileName<T extends InboundCsvFileName>(dbCsvFileName: T): T {
+  return dbCsvFileName;
+}
+export function InboundCsvFileNameMap<T extends { [key in InboundCsvFileName]?: any }>(dbCsvFileNameMap: T): T {
+  return dbCsvFileNameMap;
+}
+
+export type InboundCsvFileHeader<TFileName extends InboundCsvFileName> = keyof FromProperties<(typeof inboundCsvHeaders)[TFileName]>;
+
+export type InboundCsvFileRow<TFileName extends InboundCsvFileName> = FromProperties<(typeof inboundCsvHeaders)[TFileName]>;`;
+
+    let csvHeadersContent = '';
+
     // Process metadata files
     const objectsPath = path.join('./downloads/objects/metadata');
     const picklistsPath = path.join('./downloads/picklists/metadata');
     
+    for (const folderPath of [objectsPath, picklistsPath]) {
+        if (!fs.existsSync(folderPath)) continue;
+        
+        const files = await fs.promises.readdir(folderPath);
+        for (const file of files) {
+            if (path.extname(file) === '.json') {
+                const metadata = JSON.parse(
+                    await fs.promises.readFile(path.join(folderPath, file), 'utf8')
+                );
+
+                // Extract just the filename without directory or extension
+                const baseFileName = path.basename(metadata.fileName, '.csv').replace(/^.*\//, '');
+                
+                // Get all column headers
+                const headers = metadata.columns.map((col: { name: any; }) => `'${col.name}'`);
+                
+                // Add to csvHeadersContent with proper formatting
+                csvHeadersContent += `  ${baseFileName}: [\n    ${headers.join(',\n    ')}\n  ] as const,\n`;
+            }
+        }
+    }
+
     // Store all found relationship fields
     const relationshipFields: Array<{
         sourceEntity: string,
@@ -832,7 +875,7 @@ async function main() {
                 const metadata = JSON.parse(
                     await fs.promises.readFile(path.join(folderPath, file), 'utf8')
                 );
-                
+
                 if (metadata.rowCount > 0) {
                     const fileType = metadata.rowCount >= 30 ? 'Object' : 'Picklist';
                     // Extract just the filename without directory or extension
@@ -868,6 +911,8 @@ async function main() {
         }
     }
     
+    await fs.promises.writeFile(csvHeadersPath, csvHeadersStart + '\n' + csvHeadersContent + '\n' + csvHeadersEnd);
+
     console.log(`Summary saved to: ${summaryPath}`);
     
     // Process all the non-identifier GUID fields (potential relationships)
