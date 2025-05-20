@@ -801,18 +801,12 @@ async function downloadAllCSVs() {
     console.log('Finished downloading all CSV files');
 }
 
-async function main() {
-    console.log('Starting CSV download process...');
-    await downloadAllCSVs();
-    //await downloadCSV('dump-test/account.csv', true); // Example file for testing
-    
-    // Generate summary CSV
-    console.log('\nGenerating summary...');
-    const summaryPath = path.join('./downloads', 'summary.csv');
-    
-    // Write header - add Identifier column
-    await fs.promises.writeFile(summaryPath, 'Filename,FileType,RecordCount,LastCreationDate,Identifier\n');
-    
+// Add these new functions before the main function:
+
+async function generateCsvHeaders(objectsPath: string, picklistsPath: string): Promise<{
+    content: string;
+    path: string;
+}> {
     const csvHeadersPath = path.join('./downloads', 'csv_headers.ts');
     const csvHeadersStart = `import type { FromProperties } from '../utils/types.js';
 
@@ -834,10 +828,6 @@ export type InboundCsvFileRow<TFileName extends InboundCsvFileName> = FromProper
 
     let csvHeadersContent = '';
 
-    // Process metadata files
-    const objectsPath = path.join('./downloads/objects/metadata');
-    const picklistsPath = path.join('./downloads/picklists/metadata');
-    
     for (const folderPath of [objectsPath, picklistsPath]) {
         if (!fs.existsSync(folderPath)) continue;
         
@@ -848,23 +838,24 @@ export type InboundCsvFileRow<TFileName extends InboundCsvFileName> = FromProper
                     await fs.promises.readFile(path.join(folderPath, file), 'utf8')
                 );
 
-                // Extract just the filename without directory or extension
                 const baseFileName = path.basename(metadata.fileName, '.csv').replace(/^.*\//, '');
-                
-                // Get all column headers
                 const headers = metadata.columns.map((col: { name: any; }) => `'${col.name}'`);
-                
-                // Add to csvHeadersContent with proper formatting
                 csvHeadersContent += `  ${baseFileName}: [\n    ${headers.join(',\n    ')}\n  ] as const,\n`;
             }
         }
     }
 
-    // Store all found relationship fields
-    const relationshipFields: Array<{
-        sourceEntity: string,
-        sourceField: string
-    }> = [];
+    return {
+        content: csvHeadersStart + '\n' + csvHeadersContent + '\n' + csvHeadersEnd,
+        path: csvHeadersPath
+    };
+}
+
+async function collectRelationshipFields(objectsPath: string, picklistsPath: string, summaryPath: string): Promise<Array<{
+    sourceEntity: string;
+    sourceField: string;
+}>> {
+    const relationshipFields: Array<{ sourceEntity: string; sourceField: string }> = [];
     
     for (const folderPath of [objectsPath, picklistsPath]) {
         if (!fs.existsSync(folderPath)) continue;
@@ -878,10 +869,7 @@ export type InboundCsvFileRow<TFileName extends InboundCsvFileName> = FromProper
 
                 if (metadata.rowCount > 0) {
                     const fileType = metadata.rowCount >= 30 ? 'Object' : 'Picklist';
-                    // Extract just the filename without directory or extension
                     const baseFileName = path.basename(metadata.fileName, '.csv').replace(/^.*\//, '');
-                    
-                    // Find the GUID identifier with most unique values
                     const identifier = findIdentifierField(metadata);
                     
                     const summary = [
@@ -894,12 +882,10 @@ export type InboundCsvFileRow<TFileName extends InboundCsvFileName> = FromProper
                     
                     await fs.promises.appendFile(summaryPath, summary + '\n');
                     
-                    // Find all non-identifier GUID fields (potential foreign keys)
                     const foreignKeyFields = metadata.columns.filter((col: { dataType: string; name: string; }) => 
                         col.dataType === 'GUID' && col.name !== identifier
                     );
                     
-                    // Process each non-identifier GUID field
                     for (const foreignKeyField of foreignKeyFields) {
                         relationshipFields.push({
                             sourceEntity: baseFileName,
@@ -910,14 +896,16 @@ export type InboundCsvFileRow<TFileName extends InboundCsvFileName> = FromProper
             }
         }
     }
-    
-    await fs.promises.writeFile(csvHeadersPath, csvHeadersStart + '\n' + csvHeadersContent + '\n' + csvHeadersEnd);
 
-    console.log(`Summary saved to: ${summaryPath}`);
+    return relationshipFields;
+}
+
+async function processRelationships(
+    relationshipFields: Array<{ sourceEntity: string; sourceField: string }>,
+    objectsPath: string,
+    picklistsPath: string
+): Promise<void> {
     
-    // Process all the non-identifier GUID fields (potential relationships)
-    console.log('\nAnalyzing non-identifier GUID fields (potential relationships):');
-    if (relationshipFields.length > 0) {
         // Sort relationships by source entity and then field name
         relationshipFields.sort((a, b) => 
             a.sourceEntity.localeCompare(b.sourceEntity) || 
@@ -1191,6 +1179,33 @@ export type InboundCsvFileRow<TFileName extends InboundCsvFileName> = FromProper
         console.log('─'.repeat(90));
         console.log(`Found ${relationshipFields.length} potential relationship fields`);
         console.log(`Relationship data saved to: ${relationshipsPath}`);
+
+}
+
+// Update the main function to use the new functions:
+async function main() {
+    console.log('Starting CSV download process...');
+    //await downloadAllCSVs();
+    
+    console.log('\nGenerating summary...');
+    const summaryPath = path.join('./downloads', 'summary.csv');
+    await fs.promises.writeFile(summaryPath, 'Filename,FileType,RecordCount,LastCreationDate,Identifier\n');
+    
+    const objectsPath = path.join('./downloads/objects/metadata');
+    const picklistsPath = path.join('./downloads/picklists/metadata');
+
+    // Generate CSV headers
+    const csvHeaders = await generateCsvHeaders(objectsPath, picklistsPath);
+    await fs.promises.writeFile(csvHeaders.path, csvHeaders.content);
+
+    // Collect relationship fields and generate summary
+    const relationshipFields = await collectRelationshipFields(objectsPath, picklistsPath, summaryPath);
+    console.log(`Summary saved to: ${summaryPath}`);
+    
+    // Process relationships
+    console.log('\nAnalyzing non-identifier GUID fields (potential relationships):');
+    if (relationshipFields.length > 0) {
+        await processRelationships(relationshipFields, objectsPath, picklistsPath);
     } else {
         console.log('No non-identifier GUID fields found.');
     }
