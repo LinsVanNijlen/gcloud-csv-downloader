@@ -559,8 +559,8 @@ class CSVTransform extends Transform {
             
             this.headerIndices = this.headers
                 .map((header, index) => {
-                    const isSystemHeader = SYSTEM_HEADERS.includes(header.toLowerCase());
-                    const isLowCardinality = this.lowCardinalityColumns.has(header);
+                    const isSystemHeader = SYSTEM_HEADERS.includes(header.toLowerCase()) && excludeSystemHeaders;
+                    const isLowCardinality = this.lowCardinalityColumns.has(header) && removeLowCardinality;
                     return (!isSystemHeader && !isLowCardinality) ? index : -1;
                 })
                 .filter(index => index !== -1);
@@ -660,19 +660,19 @@ class CSVTransform extends Transform {
 }
 
 // Then modify the downloadCSV function to use the low cardinality columns and updated row count
-async function downloadCSV(fileName: string, excludeSystemHeaders: boolean = true) {
+async function downloadCSV(fileName: string) {
     try {
         console.log(`\nProcessing ${fileName}...`);
         
         console.log('Analyzing unique values per column...');
         const uniqueCounts = await analyzeUniqueValues(fileName);
-        
+
         const lowCardinalityColumns = Array.from(uniqueCounts.entries())
             .filter(([header, count]) => 
-                count <= 1 && (!excludeSystemHeaders || !SYSTEM_HEADERS.includes(header.toLowerCase()))
+                count <= 1 && (!SYSTEM_HEADERS.includes(header.toLowerCase()))
             );
         
-        if (lowCardinalityColumns.length > 0) {
+        if (lowCardinalityColumns.length > 0 && removeLowCardinality) {
             console.log('\nRemoving columns with constant values (1 or fewer unique values):');
             console.log('─'.repeat(50));
             console.log('Column Name'.padEnd(35) + 'Unique Values');
@@ -794,7 +794,7 @@ async function downloadAllCSVs() {
     
     for (const [index, file] of csvFiles.entries()) {
         console.log(`\nProcessing file ${index + 1}/${csvFiles.length}`);
-        await downloadCSV(file.name, excludeSystemHeaders );
+        await downloadCSV(file.name);
     }
     
     console.log('\n' + '─'.repeat(50));
