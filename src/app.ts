@@ -1182,6 +1182,63 @@ async function processRelationships(
 
 }
 
+async function generateSourceConfigs(objectsPath: string, picklistsPath: string): Promise<void> {
+    const sourceConfigPath = path.join('./downloads', 'source-configs');
+    if (!fs.existsSync(sourceConfigPath)) {
+        fs.mkdirSync(sourceConfigPath, { recursive: true });
+    }
+
+    for (const folderPath of [objectsPath, picklistsPath]) {
+        if (!fs.existsSync(folderPath)) continue;
+        
+        const files = await fs.promises.readdir(folderPath);
+        for (const file of files) {
+            if (path.extname(file) === '.json') {
+                const metadata = JSON.parse(
+                    await fs.promises.readFile(path.join(folderPath, file), 'utf8')
+                );
+
+                if (metadata.rowCount > 0) {
+                    const baseFileName = path.basename(metadata.fileName, '.csv').replace(/^.*\//, '');
+                    const identifier = findIdentifierField(metadata);
+                    
+                    if (identifier) {
+                        const configContent = `import { inboundSourceConfig } from '../../utils/migration-utils.js';
+import { InboundCsvFileName, inboundCsvHeaders } from '../csv-headers.js';
+
+const filename = InboundCsvFileName('${baseFileName}');
+
+export const ${baseFileName}Source = inboundSourceConfig({
+  filename: filename,
+  headers: inboundCsvHeaders[filename],
+  primaryKey: 'pk',
+  inboundFieldPrefix: 'Dyn',
+  fieldTypeOverrides: {},
+  longTextFields: [],
+  keyResolvers: {
+    pk: ['${identifier}'],
+    ${baseFileName}Key: async ({ sourceRecord }) => \`\${sourceRecord.${identifier}}\`,
+  },
+  filter: () => true,
+  csvImportOptions: {
+    delimiter: ',',
+    primaryKeyFields: ['${identifier}'],
+    encoding: 'ISO-8859-15',
+    divideInSections: 10,
+    divideInSectionsByField: '${identifier}',
+  },
+});
+`;
+                        const configFilePath = path.join(sourceConfigPath, `${baseFileName}-source.ts`);
+                        await fs.promises.writeFile(configFilePath, configContent);
+                        console.log(`Generated source config: ${configFilePath}`);
+                    }
+                }
+            }
+        }
+    }
+}
+
 // Update the main function to use the new functions:
 async function main() {
     console.log('Starting CSV download process...');
@@ -1198,8 +1255,12 @@ async function main() {
     const csvHeaders = await generateCsvHeaders(objectsPath, picklistsPath);
     await fs.promises.writeFile(csvHeaders.path, csvHeaders.content);
 
+    // Generate source configs
+    console.log('\nGenerating source configurations...');
+    await generateSourceConfigs(objectsPath, picklistsPath);
+
     // Collect relationship fields and generate summary
-    const relationshipFields = await collectRelationshipFields(objectsPath, picklistsPath, summaryPath);
+    /*const relationshipFields = await collectRelationshipFields(objectsPath, picklistsPath, summaryPath);
     console.log(`Summary saved to: ${summaryPath}`);
     
     // Process relationships
@@ -1208,7 +1269,7 @@ async function main() {
         await processRelationships(relationshipFields, objectsPath, picklistsPath);
     } else {
         console.log('No non-identifier GUID fields found.');
-    }
+    }*/
 }
 
 // Helper function to find the GUID field with most unique values
