@@ -1203,30 +1203,41 @@ async function generateSourceConfigs(objectsPath: string, picklistsPath: string)
                     const identifier = findIdentifierField(metadata);
                     
                     if (identifier) {
+                        // Determine if we need division settings
+                        const needsDivision = metadata.rowCount > 500000;
+                        
+                        const csvImportOptions = needsDivision ? 
+                            `    csvImportOptions: {
+      delimiter: ',',
+      primaryKeyFields: ['${identifier}'],
+      encoding: 'ISO-8859-15',
+      divideInSections: 10,
+      divideInSectionsByField: '${identifier}',
+    },` :
+                            `    csvImportOptions: {
+      delimiter: ',',
+      primaryKeyFields: ['${identifier}'],
+      encoding: 'ISO-8859-15',
+    },`;
+
                         const configContent = `import { inboundSourceConfig } from '../../utils/migration-utils.js';
 import { InboundCsvFileName, inboundCsvHeaders } from '../csv-headers.js';
 
 const filename = InboundCsvFileName('${baseFileName}');
 
 export const ${baseFileName}Source = inboundSourceConfig({
-  filename: filename,
-  headers: inboundCsvHeaders[filename],
-  primaryKey: 'pk',
-  inboundFieldPrefix: 'Dyn',
-  fieldTypeOverrides: {},
-  longTextFields: [],
-  keyResolvers: {
-    pk: ['${identifier}'],
-    ${baseFileName}Key: async ({ sourceRecord }) => \`\${sourceRecord.${identifier}}\`,
-  },
-  filter: () => true,
-  csvImportOptions: {
-    delimiter: ',',
-    primaryKeyFields: ['${identifier}'],
-    encoding: 'ISO-8859-15',
-    divideInSections: 10,
-    divideInSectionsByField: '${identifier}',
-  },
+    filename: filename,
+    headers: inboundCsvHeaders[filename],
+    primaryKey: 'pk',
+    inboundFieldPrefix: 'Dyn',
+    fieldTypeOverrides: {},
+    longTextFields: [],
+    keyResolvers: {
+        pk: ['${identifier}'],
+        ${baseFileName}Key: async ({ sourceRecord }) => \`\${sourceRecord.${identifier}}\`,
+    },
+    filter: () => true,
+${csvImportOptions}
 });
 `;
                         const configFilePath = path.join(sourceConfigPath, `${baseFileName}-source.ts`);
