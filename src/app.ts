@@ -16,6 +16,8 @@ function getRequiredEnvVar(name: string): string {
 }
 
 const bucketName = getRequiredEnvVar('BUCKET_NAME');
+const excludeSystemHeaders = getRequiredEnvVar('EXCLUDE_SYSTEM_HEADERS') === 'true';
+const removeLowCardinality = getRequiredEnvVar('REMOVE_LOW_CARDINALITY') === 'true';
 const storage = new Storage({});
 
 const SYSTEM_HEADERS = [
@@ -61,6 +63,7 @@ const SYSTEM_HEADERS = [
 
 async function listFiles() {
     try {
+        console.log(bucketName);
         const [files] = await storage.bucket(bucketName).getFiles();
         console.log('Files in bucket:');
         files.forEach(file => {
@@ -791,7 +794,7 @@ async function downloadAllCSVs() {
     
     for (const [index, file] of csvFiles.entries()) {
         console.log(`\nProcessing file ${index + 1}/${csvFiles.length}`);
-        await downloadCSV(file.name);
+        await downloadCSV(file.name, excludeSystemHeaders );
     }
     
     console.log('\n' + '─'.repeat(50));
@@ -800,7 +803,7 @@ async function downloadAllCSVs() {
 
 async function main() {
     console.log('Starting CSV download process...');
-    //await downloadAllCSVs();
+    await downloadAllCSVs();
     //await downloadCSV('dump-test/account.csv', true); // Example file for testing
     
     // Generate summary CSV
