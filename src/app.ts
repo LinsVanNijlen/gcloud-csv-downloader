@@ -1203,6 +1203,16 @@ async function generateSourceConfigs(objectsPath: string, picklistsPath: string)
                     const identifier = findIdentifierField(metadata);
                     
                     if (identifier) {
+                        // Find fields with max length > 250
+                        const longTextFields = metadata.columns
+                            .filter((col: { maxLength: number; }) => col.maxLength && col.maxLength > 250)
+                            .map((col: { name: any; }) => col.name);
+
+                        // Format the longTextFields array
+                        const longTextFieldsStr = longTextFields.length > 0 
+                            ? `    longTextFields: [\n        ${longTextFields.map((field: any) => `'${field}'`).join(',\n        ')}\n    ],`
+                            : '    longTextFields: [],';
+                        
                         // Determine if we need division settings
                         const needsDivision = metadata.rowCount > 500000;
                         
@@ -1231,7 +1241,7 @@ export const ${baseFileName}Source = inboundSourceConfig({
     primaryKey: 'pk',
     inboundFieldPrefix: 'Dyn',
     fieldTypeOverrides: {},
-    longTextFields: [],
+${longTextFieldsStr}
     keyResolvers: {
         pk: ['${identifier}'],
         ${baseFileName}Key: async ({ sourceRecord }) => \`\${sourceRecord.${identifier}}\`,
@@ -1240,7 +1250,7 @@ export const ${baseFileName}Source = inboundSourceConfig({
 ${csvImportOptions}
 });
 `;
-                        const configFilePath = path.join(sourceConfigPath, `${baseFileName}-source.ts`);
+                        const configFilePath = path.join(sourceConfigPath, `${baseFileName}.ts`);
                         await fs.promises.writeFile(configFilePath, configContent);
                         console.log(`Generated source config: ${configFilePath}`);
                     }
