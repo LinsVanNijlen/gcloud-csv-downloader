@@ -1220,14 +1220,14 @@ async function generateSourceConfigs(objectsPath: string, picklistsPath: string)
                             `    csvImportOptions: {
       delimiter: ',',
       primaryKeyFields: ['${identifier}'],
-      encoding: 'ISO-8859-15',
+      encoding: 'UTF-8',
       divideInSections: 10,
       divideInSectionsByField: '${identifier}',
     },` :
                             `    csvImportOptions: {
       delimiter: ',',
       primaryKeyFields: ['${identifier}'],
-      encoding: 'ISO-8859-15',
+      encoding: 'UTF-8',
     },`;
 
                         const configContent = `import { inboundSourceConfig } from '../../utils/migration-utils.js';
@@ -1239,7 +1239,7 @@ export const ${baseFileName}Source = inboundSourceConfig({
     filename: filename,
     headers: inboundCsvHeaders[filename],
     primaryKey: 'pk',
-    inboundFieldPrefix: 'Dyn',
+    inboundFieldPrefix: '',
     fieldTypeOverrides: {},
 ${longTextFieldsStr}
     keyResolvers: {
@@ -1304,10 +1304,10 @@ async function generateTargetConfigs(objectsPath: string, picklistsPath: string)
                     const entityRelationships = relationshipsByEntity[baseFileName] || [];
                     
                     // Generate imports
-                    const imports = [`import { lookupRef, LookupRef, targetConfig, targetSourceConfig } from "../../../migration-core";`,
-                        `import { assignInboundFields, defaultInboundTargetConfig, inboundConfigValidator } from "../../utils/migration-utils";`,
-                        `import { ${baseFileName}Source } from "../source-configs/${baseFileName}";`,
-                        `import { SfdcRow } from "../table-types";`
+                    const imports = [`import { lookupRef, LookupRef, targetConfig, targetSourceConfig } from "../../../migration-core/index.js";`,
+                        `import { assignInboundFields, defaultInboundTargetConfig, inboundConfigValidator } from "../../utils/migration-utils.js";`,
+                        `import { ${baseFileName}Source } from "../source-configs/${baseFileName}.js";`,
+                        `import { SfdcRow } from "../table-types.js";`
                     ];
 
                     // Add imports for related entities
@@ -1315,34 +1315,40 @@ async function generateTargetConfigs(objectsPath: string, picklistsPath: string)
                     uniqueTargetEntities.forEach(targetEntity => {
                         // Skip importing own class to avoid circular dependencies
                         if (targetEntity !== baseFileName) {
-                            imports.push(`import { Dyn__${targetEntity}__c } from "./${targetEntity}";`);
+                            imports.push(`import { Dyn_${targetEntity}__c } from "./${targetEntity}.js";`);
                         }
                     });
 
                     // Generate class definition
-                    const classProps = [`  public Dyn__${baseFileName}Key__c?: string = undefined;`];
+                    const classProps = [`  public DynKey__c?: string = undefined;`];
                     entityRelationships.forEach(rel => {
-                        classProps.push(`  public Dyn__${rel.sourceField}__c: LookupRef<Dyn__${rel.targetEntity}__c> | null | undefined = undefined;`);
+                        classProps.push(`  public Dyn_${rel.sourceField}__c: LookupRef<Dyn_${rel.targetEntity}__c> | null | undefined = undefined;`);
                     });
 
-                    const classDefinition = `\nexport class Dyn__${baseFileName}__c extends SfdcRow {\n${classProps.join('\n')}\n}`;
+                    const classDefinition = `\nexport class Dyn_${baseFileName}__c extends SfdcRow {\n${classProps.join('\n')}\n}`;
 
                     // Generate lookup assignments
                     const lookupAssignments = entityRelationships.map(rel => 
-                        `    record.Dyn__${rel.sourceField}__c = lookupRef(\`\${${baseFileName}.${rel.sourceField}}\`);`
+                        `    record.Dyn_${rel.sourceField}__c = lookupRef(\`\${${baseFileName}.${rel.sourceField}}\`);`
                     );
 
+                    const nameAssignment = metadata.columns.some((col: { name: string; }) => col.name === 'name') ? 
+    `record.Name = ${baseFileName}['name'];` :
+    metadata.columns.some((col: { name: string; }) => col.name === 'vlk_name') ?
+        `record.Name = ${baseFileName}['vlk_name'];` :
+        '';
+
                     // Generate target config
-                    const targetConfigContent = `\nexport const Dyn__${baseFileName}__c_Target = targetConfig({
+                    const targetConfigContent = `\nexport const Dyn_${baseFileName}__c_Target = targetConfig({
   ...defaultInboundTargetConfig,
-  targetTableName: "Dyn__${baseFileName}__c",
+  targetTableName: "Dyn_${baseFileName}__c",
   sources: {
     ${baseFileName}: targetSourceConfig({
       sourceConfig: ${baseFileName}Source,
       sourceKey: "${baseFileName}Key",
     }),
   },
-}).setRowDigester<Dyn__${baseFileName}__c>({
+}).setRowDigester<Dyn_${baseFileName}__c>({
   validate: inboundConfigValidator([${baseFileName}Source], []),
   digest: async (context) => {
     const {
@@ -1350,13 +1356,13 @@ async function generateTargetConfigs(objectsPath: string, picklistsPath: string)
       key,
     } = context;
 
-    const record: Dyn__${baseFileName}__c = {
+    const record: Dyn_${baseFileName}__c = {
       ...(await assignInboundFields(${baseFileName}Source, ${baseFileName})),
     };
 
 ${lookupAssignments.join('\n')}
-
-    record.Dyn__${baseFileName}Key__c = key;
+    ${nameAssignment}
+    record.DynKey__c = key;
     return record;
   }
 })`;
@@ -1371,7 +1377,126 @@ ${lookupAssignments.join('\n')}
     }
 }
 
-// Update the main function to use the new functions:
+// New function to generate index.ts for source configs
+async function generateSourceConfigIndex(sourceConfigPath: string): Promise<void> {
+    // Read all .ts files in the source-configs directory
+    const files = await fs.promises.readdir(sourceConfigPath);
+    const sourceFiles = files.filter(file => 
+        file.endsWith('.ts') && 
+        file !== 'index.ts'
+    );
+
+    // Generate imports
+    const imports = sourceFiles.map(file => {
+        const basename = path.basename(file, '.ts');
+        return `import { ${basename}Source } from './${basename}.js';`;
+    }).join('\n');
+
+    // Generate source configs object
+    const sourceConfigEntries = sourceFiles.map(file => {
+        const basename = path.basename(file, '.ts');
+        return `  [${basename}Source.filename]: ${basename}Source,`;
+    }).join('\n');
+
+    // Create the complete index.ts content
+    const indexContent = `// Auto-generated index file for source configs
+${imports}
+
+export const sourceConfigs = {
+${sourceConfigEntries}
+} as const;
+
+// Export type for available source configs
+export type SourceConfigKey = keyof typeof sourceConfigs;
+
+// Helper function to get source config by key with type safety
+export function getSourceConfig<T extends SourceConfigKey>(key: T): typeof sourceConfigs[T] {
+  return sourceConfigs[key];
+}
+`;
+
+    // Write the index.ts file
+    const indexPath = path.join(sourceConfigPath, 'index.ts');
+    await fs.promises.writeFile(indexPath, indexContent);
+    console.log(`Generated source config index: ${indexPath}`);
+}
+
+// New function to generate migration config
+async function generateMigrationConfig(targetConfigPath: string): Promise<void> {
+    // Read all .ts files in the target-configs directory
+    const files = await fs.promises.readdir(targetConfigPath);
+    const targetFiles = files.filter(file => 
+        file.endsWith('.ts') && 
+        file !== 'index.ts'
+    );
+
+    // Generate imports
+    const imports = targetFiles.map(file => {
+        const basename = path.basename(file, '.ts');
+        return `import { Dyn_${basename}__c_Target } from './table-configs/target-configs/${basename}.js';`;
+    }).join('\n');
+
+    // Generate target configs array entries
+    const targetConfigEntries = targetFiles.map(file => {
+        const basename = path.basename(file, '.ts');
+        return `    Dyn_${basename}__c_Target,`;
+    }).join('\n');
+
+    // Create the complete migration config content
+    const configContent = `import { MigrationConfig, SourceConfig, TargetSourceConfig, UnknownSourceConfig, objectKeys } from '../migration-core/index.js';
+import { mongoDbName, mongoUrl } from './table-configs/global-config/connection.js';
+import { globalTargetOrg } from './table-configs/global-config/target-org.js';
+
+${imports}
+
+export const migrationConfig: MigrationConfig = {
+  mongoUrl: mongoUrl(),
+  db: mongoDbName(),
+  targetOrg: globalTargetOrg,
+  steps: [
+    'LOAD-SOURCE',
+    'CREATE-TARGET-ROWS',
+    'DIGEST',
+    'PUSH',
+  ],
+  recursive: false,
+  targetConfigs: [
+${targetConfigEntries}
+  ],
+};
+
+export const validationProductionConfig: MigrationConfig = {
+  ...migrationConfig,
+  steps: ['VALIDATE'],
+};
+
+export const validationSandboxConfig: MigrationConfig = {
+  ...migrationConfig,
+  steps: ['VALIDATE'],
+};
+
+function getSourceConfigs(targetConfigs: MigrationConfig['targetConfigs']) {
+  const sourceConfigs: {
+    [sourceTableName: string]: SourceConfig<any, any>;
+  } = {};
+  targetConfigs.forEach((targetConfig) => {
+    objectKeys(targetConfig.sources).forEach((targetSourceKey) => {
+      const targetSource = targetConfig.sources[targetSourceKey] as TargetSourceConfig<UnknownSourceConfig>;
+      sourceConfigs[targetSource.sourceConfig.sourceTableName] = targetSource.sourceConfig;
+    });
+  });
+
+  return sourceConfigs;
+}
+
+export const sourceConfigs = getSourceConfigs(migrationConfig.targetConfigs);
+`;
+
+    // Write the migration-config.ts file
+    const configPath = path.join('./downloads', 'migration-config.ts');
+    await fs.promises.writeFile(configPath, configContent);
+    console.log(`Generated migration config: ${configPath}`);
+}
 async function main() {
     console.log('Starting CSV download process...');
     //await downloadAllCSVs();
@@ -1388,7 +1513,7 @@ async function main() {
     await fs.promises.writeFile(csvHeaders.path, csvHeaders.content);
 
     // Collect relationship fields and generate summary
-    const relationshipFields = await collectRelationshipFields(objectsPath, picklistsPath, summaryPath);
+    //const relationshipFields = await collectRelationshipFields(objectsPath, picklistsPath, summaryPath);
     console.log(`Summary saved to: ${summaryPath}`);
     
     // Process relationships
@@ -1406,6 +1531,14 @@ async function main() {
     // Generate target configs
     console.log('\nGenerating target configurations...');
     await generateTargetConfigs(objectsPath, picklistsPath);
+
+    // Generate index.ts for source configs
+    const sourceConfigPath = path.join('./downloads', 'source-configs');
+    await generateSourceConfigIndex(sourceConfigPath);
+
+    // Generate migration config
+    const targetConfigPath = path.join('./downloads', 'target-configs');
+    await generateMigrationConfig(targetConfigPath);
 }
 
 // Helper function to find the GUID field with most unique values
